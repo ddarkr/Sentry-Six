@@ -3,11 +3,11 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn, spawnSync } = require('child_process');
-const { buildQualityFilter, assertOutputIsNotSource } = require('./main/videoQuality');
 const { writeCompactDashboardAss, writeDefaultDashboardAss, writeDetailedDashboardAss, writeTeslaMobileDashboardAss, writeTeslaMobileDateAss, writeTeslaMobileDataAss, writeTeslaScreenDashAss, writeMinimapAss } = require('./assGenerator');
 // Pure-JS PNG compositor used for blur masks. Replaces `sharp` so Linux (and other)
 // users don't need the native libvips binaries bundled.
 const { PNG } = require('pngjs');
+const { buildQualityFilter, assertOutputIsNotSource } = require('./main/videoQuality');
 function compositeBlurMasks(width, height, zones) {
   const canvas = new PNG({ width, height });
   canvas.data.fill(0);
@@ -283,7 +283,6 @@ async function applyBlurZonesToStreams({ blurZones, blurType, streams, streamTag
 // Video Export Implementation
 async function performVideoExport(event, exportId, exportData, ffmpegPath) {
   const { segments, startTimeMs, endTimeMs, outputPath, cameras, mobileExport, quality, includeDashboard, seiData, layoutData, overlayData = null, useMetric, dashboardStyle = 'standard', dashboardPosition = 'bottom-center', dashboardSize = 'medium', dashboardLabelScale = 1, dashboardValueScale = 1, dashboardDateValueScale = 1, includeTimestamp = false, timestampPosition = 'bottom-center', timestampDateFormat = 'mdy', timestampTimeFormat = '12h', blurZones = [], blurType = 'solid', language = 'en', includeMinimap = false, minimapPosition = 'top-right', minimapSize = 'small', minimapRenderMode = 'ass', minimapDarkMode = false, mapPath = [], mirrorCameras = true, accelPedMode = 'iconbar', enableTimelapse = false, timelapseSpeed = 1 } = exportData;
-  const qualityFilter = buildQualityFilter(exportData.qualityAdjustment);
   const isAdvancedLayout = !!(layoutData && layoutData.layoutMode === 'advanced');
 
   console.log(`[EXPORT] Received exportData - includeMinimap: ${includeMinimap}, mapPath.length: ${mapPath?.length || 0}, minimapPosition: ${minimapPosition}, minimapSize: ${minimapSize}, renderMode: ${minimapRenderMode}`);
@@ -1152,6 +1151,7 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
 
     const filters = [];
     const streamTags = [];
+    const qualityFilter = buildQualityFilter(exportData.qualityAdjustment);
 
     if (aeLayoutApplied) {
       // Advanced Editor layout: each camera scales to ITS own tile size and
