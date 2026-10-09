@@ -5,6 +5,12 @@ const { contextBridge, ipcRenderer } = require('electron');
 const listenerWrappers = new Map();
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  // Read-only remotes configured in the installed rclone CLI.
+  rcloneRemotes: () => ipcRenderer.invoke('rclone:remotes'),
+  rcloneList: (remote, folder) => ipcRenderer.invoke('rclone:list', remote, folder),
+  rcloneOpen: (remote, folder) => ipcRenderer.invoke('rclone:open', remote, folder),
+  rcloneCancel: () => ipcRenderer.invoke('rclone:cancel'),
+
   // Folder/file operations
   openFolder: (startPath) => ipcRenderer.invoke('dialog:openFolder', startPath),
   openFile: (filters) => ipcRenderer.invoke('dialog:openFile', filters),

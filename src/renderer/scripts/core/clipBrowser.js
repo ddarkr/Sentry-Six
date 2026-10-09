@@ -1,3 +1,4 @@
+import { isReadOnlyRclonePath } from '../features/rcloneBrowser.js';
 /**
  * Clip Browser Module
  * Handles clip list rendering, selection, and display item building.
@@ -173,7 +174,7 @@ export function createClipItem(coll, title, typeClass) {
     }
     
     // Only show delete button if we have a folder path (Electron mode)
-    const deleteBtn = folderPath ? `
+    const deleteBtn = folderPath && !isReadOnlyRclonePath(folderPath) ? `
         <button class="clip-delete-btn" title="${escapeHtml(t('ui.clipBrowser.deleteClip'))}" data-folderpath="${escapeHtml(folderPath)}">
             <span class="material-symbols-outlined mi-sm">delete</span>
         </button>
