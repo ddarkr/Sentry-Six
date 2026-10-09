@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn, spawnSync } = require('child_process');
+const { buildQualityFilter, assertOutputIsNotSource } = require('./main/videoQuality');
 const { writeCompactDashboardAss, writeDefaultDashboardAss, writeDetailedDashboardAss, writeTeslaMobileDashboardAss, writeTeslaMobileDateAss, writeTeslaMobileDataAss, writeTeslaScreenDashAss, writeMinimapAss } = require('./assGenerator');
 // Pure-JS PNG compositor used for blur masks. Replaces `sharp` so Linux (and other)
 // users don't need the native libvips binaries bundled.
@@ -282,6 +283,7 @@ async function applyBlurZonesToStreams({ blurZones, blurType, streams, streamTag
 // Video Export Implementation
 async function performVideoExport(event, exportId, exportData, ffmpegPath) {
   const { segments, startTimeMs, endTimeMs, outputPath, cameras, mobileExport, quality, includeDashboard, seiData, layoutData, overlayData = null, useMetric, dashboardStyle = 'standard', dashboardPosition = 'bottom-center', dashboardSize = 'medium', dashboardLabelScale = 1, dashboardValueScale = 1, dashboardDateValueScale = 1, includeTimestamp = false, timestampPosition = 'bottom-center', timestampDateFormat = 'mdy', timestampTimeFormat = '12h', blurZones = [], blurType = 'solid', language = 'en', includeMinimap = false, minimapPosition = 'top-right', minimapSize = 'small', minimapRenderMode = 'ass', minimapDarkMode = false, mapPath = [], mirrorCameras = true, accelPedMode = 'iconbar', enableTimelapse = false, timelapseSpeed = 1 } = exportData;
+  const qualityFilter = buildQualityFilter(exportData.qualityAdjustment);
   const isAdvancedLayout = !!(layoutData && layoutData.layoutMode === 'advanced');
 
   console.log(`[EXPORT] Received exportData - includeMinimap: ${includeMinimap}, mapPath.length: ${mapPath?.length || 0}, minimapPosition: ${minimapPosition}, minimapSize: ${minimapSize}, renderMode: ${minimapRenderMode}`);
@@ -1185,6 +1187,8 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
         // drifts the aspect slightly.
         let chain = `[${srcIdx}:v]setpts=PTS-STARTPTS`;
         chain += `,fps=${FPS}:round=near`; // Smooth frame rate conversion
+        // Adjust source camera pixels only, before scaling, blur masks and overlays.
+        if (hasVideo && qualityFilter) chain += `,${qualityFilter}`;
         if (hasVideo && isMirrored) chain += ',hflip';
         chain += `,scale=${finalW}:${finalH}:force_original_aspect_ratio=increase:flags=lanczos`;
         chain += `,crop=${finalW}:${finalH}:(iw-${finalW})/2:(ih-${finalH})/2`;
@@ -1239,6 +1243,8 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
         // Normalize timestamps, convert frame rate, mirror if needed, scale to target size
         let chain = `[${srcIdx}:v]setpts=PTS-STARTPTS`;
         chain += `,fps=${FPS}:round=near`; // Smooth frame rate conversion
+        // Adjust source camera pixels only, before scaling, blur masks and overlays.
+        if (hasVideo && qualityFilter) chain += `,${qualityFilter}`;
         if (hasVideo && isMirrored) chain += ',hflip';
         chain += `,scale=${camW}:${camH}:force_original_aspect_ratio=disable:flags=lanczos,setsar=1[v${i}]`;
 
@@ -1290,6 +1296,8 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
         // Normalize timestamps, convert frame rate, mirror if needed, scale to target size
         let chain = `[${srcIdx}:v]setpts=PTS-STARTPTS`;
         chain += `,fps=${FPS}:round=near`; // Smooth frame rate conversion
+        // Adjust source camera pixels only, before scaling, blur masks and overlays.
+        if (hasVideo && qualityFilter) chain += `,${qualityFilter}`;
         if (hasVideo && isMirrored) chain += ',hflip';
         chain += `,scale=${w}:${h}:force_original_aspect_ratio=disable:flags=lanczos,setsar=1[v${i}]`;
 
@@ -2092,6 +2100,8 @@ ipcMain.handle('export:start', async (event, exportId, exportData) => {
       throw new Error('FFmpeg not found. Please install FFmpeg or place it in the ffmpeg_bin directory.');
     }
 
+    // Never allow export/failed-export cleanup to overwrite an input recording.
+    assertOutputIsNotSource(exportData.segments, exportData.outputPath);
     const result = await performVideoExport(event, exportId, exportData, ffmpegPath);
     return result;
   } catch (error) {
