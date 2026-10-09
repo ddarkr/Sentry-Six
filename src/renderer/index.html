@@ -742,6 +742,86 @@
                             </div>
                         </div>
 
+                        <!-- Manual correction applies only during the simple modal export. -->
+                        <div class="collapsible-section" data-section="quality-adjustment">
+                            <div class="collapsible-header">
+                                <span class="collapsible-header-title">
+                                    <span class="material-symbols-outlined mi-md">tune</span>
+                                    <span>Manual image correction (optional)</span>
+                                </span>
+                                <span class="material-symbols-outlined mi-sm">expand_more</span>
+                            </div>
+                            <div class="collapsible-body">
+                                <div class="collapsible-content">
+                                    <label class="toggle-row">
+                                        <div class="toggle-row-info">
+                                            <span class="toggle-row-label">Enable correction for this export</span>
+                                            <span class="toggle-row-desc">Off by default. Original recordings stay unchanged.</span>
+                                        </div>
+                                        <div class="toggle-switch">
+                                            <input type="checkbox" id="qualityAdjustmentEnabled">
+                                            <div class="toggle-switch-track"><div class="toggle-switch-thumb"></div></div>
+                                        </div>
+                                    </label>
+                                    <fieldset id="qualityAdjustmentFields" disabled style="border: 0; padding: 0; margin: 0; min-width: 0;">
+                                        <legend class="select-row-label">Conservative adjustment limits</legend>
+                                        <label class="select-row" for="qualityAdjustment-brightness">
+                                            <span class="select-row-label">Brightness</span>
+                                            <input id="qualityAdjustment-brightness" type="range" min="-0.08" max="0.08" step="0.01" value="0" aria-describedby="qualityAdjustmentNote">
+                                            <output id="qualityAdjustment-brightness-value" for="qualityAdjustment-brightness">0</output>
+                                        </label>
+                                        <label class="select-row" for="qualityAdjustment-gamma">
+                                            <span class="select-row-label">Gamma</span>
+                                            <input id="qualityAdjustment-gamma" type="range" min="0.8" max="1.2" step="0.01" value="1" aria-describedby="qualityAdjustmentNote">
+                                            <output id="qualityAdjustment-gamma-value" for="qualityAdjustment-gamma">1</output>
+                                        </label>
+                                        <label class="select-row" for="qualityAdjustment-contrast">
+                                            <span class="select-row-label">Contrast</span>
+                                            <input id="qualityAdjustment-contrast" type="range" min="0.85" max="1.15" step="0.01" value="1" aria-describedby="qualityAdjustmentNote">
+                                            <output id="qualityAdjustment-contrast-value" for="qualityAdjustment-contrast">1</output>
+                                        </label>
+                                        <label class="select-row" for="qualityAdjustment-saturation">
+                                            <span class="select-row-label">Saturation</span>
+                                            <input id="qualityAdjustment-saturation" type="range" min="0.8" max="1.2" step="0.01" value="1" aria-describedby="qualityAdjustmentNote">
+                                            <output id="qualityAdjustment-saturation-value" for="qualityAdjustment-saturation">1</output>
+                                        </label>
+                                        <label class="select-row" for="qualityAdjustment-red">
+                                            <span class="select-row-label">Red midtones</span>
+                                            <input id="qualityAdjustment-red" type="range" min="-0.08" max="0.08" step="0.01" value="0" aria-describedby="qualityAdjustmentNote">
+                                            <output id="qualityAdjustment-red-value" for="qualityAdjustment-red">0</output>
+                                        </label>
+                                        <label class="select-row" for="qualityAdjustment-green">
+                                            <span class="select-row-label">Green midtones</span>
+                                            <input id="qualityAdjustment-green" type="range" min="-0.08" max="0.08" step="0.01" value="0" aria-describedby="qualityAdjustmentNote">
+                                            <output id="qualityAdjustment-green-value" for="qualityAdjustment-green">0</output>
+                                        </label>
+                                        <label class="select-row" for="qualityAdjustment-blue">
+                                            <span class="select-row-label">Blue midtones</span>
+                                            <input id="qualityAdjustment-blue" type="range" min="-0.08" max="0.08" step="0.01" value="0" aria-describedby="qualityAdjustmentNote">
+                                            <output id="qualityAdjustment-blue-value" for="qualityAdjustment-blue">0</output>
+                                        </label>
+                                        <label class="select-row" for="qualityAdjustment-denoise">
+                                            <span class="select-row-label">Mild denoise</span>
+                                            <input id="qualityAdjustment-denoise" type="range" min="0" max="1" step="0.1" value="0" aria-describedby="qualityAdjustmentNote">
+                                            <output id="qualityAdjustment-denoise-value" for="qualityAdjustment-denoise">0</output>
+                                        </label>
+                                        <label class="select-row" for="qualityAdjustment-sharpen">
+                                            <span class="select-row-label">Mild sharpen</span>
+                                            <input id="qualityAdjustment-sharpen" type="range" min="0" max="0.3" step="0.05" value="0" aria-describedby="qualityAdjustmentNote">
+                                            <output id="qualityAdjustment-sharpen-value" for="qualityAdjustment-sharpen">0</output>
+                                        </label>
+                                    </fieldset>
+                                    <button id="qualityAdjustmentReset" type="button" class="btn-secondary">Reset and turn off</button>
+                                    <div id="qualityAdjustmentNote" class="info-box info-yellow" style="margin-top: 8px;">
+                                        Export-only: the player and layout previews remain unadjusted. Try a short export at High or Maximum quality before exporting the full clip. These settings do not carry into the Advanced Editor.
+                                    </div>
+                                    <div class="info-box info-blue" style="margin-top: 8px;">
+                                        Manual correction cannot restore lost detail or verify a plate. Denoise may erase detail; sharpening may add halos. No AI, generated frames, stabilization, or Tesla-specific LUT is applied. Keep the original files separately.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- Time-Lapse - Collapsible -->
                         <div class="collapsible-section" data-section="timelapse">
                             <div class="collapsible-header">
