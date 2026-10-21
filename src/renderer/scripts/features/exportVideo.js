@@ -3,6 +3,7 @@
  * Handles video export with FFmpeg, markers, and progress tracking
  */
 
+import { initQualityAdjustmentControls, getQualityAdjustment } from './qualityAdjustment.js';
 import { notify } from '../ui/notifications.js';
 import { formatTimeHMS } from '../ui/timeDisplay.js';
 import { initBlurZoneEditor, getNormalizedCoordinates, resetBlurZoneEditor, generateMaskImage, getCanvasDimensions } from '../ui/blurZoneEditor.js';
@@ -847,6 +848,8 @@ export function openExportModal() {
 
     const modal = $('exportModal');
     if (!modal) return;
+
+    initQualityAdjustmentControls();
 
     // Detect available cameras from the collection
     const availableCameras = detectAvailableCameras(state);
@@ -2302,6 +2305,7 @@ export async function startExport() {
             endTimeMs,
             outputPath,
             cameras,
+            qualityAdjustment: getQualityAdjustment(),
             baseFolderPath,
             quality,
             // Only include dashboard if checkbox was checked AND we successfully extracted SEI data
