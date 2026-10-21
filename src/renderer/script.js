@@ -1,3 +1,4 @@
+import { initRcloneBrowser } from './scripts/features/rcloneBrowser.js';
 import { MULTI_LAYOUTS, DEFAULT_MULTI_LAYOUT } from './scripts/lib/multiLayouts.js';
 import { CLIPS_MODE_KEY, MULTI_LAYOUT_KEY, MULTI_ENABLED_KEY, SENTRY_CAMERA_HIGHLIGHT_KEY, SAVED_CAMERA_HIGHLIGHT_KEY } from './scripts/lib/storageKeys.js';
 import { createClipsPanelMode } from './scripts/ui/panelMode.js';
@@ -4824,4 +4825,15 @@ initCameraRearrange({
     syncMultiVideos,
     playNative,
     updateEventCameraHighlight
+});
+
+// Remote files are complete local snapshots before entering existing playback/export.
+initRcloneBrowser(async ({ directory, source }) => {
+    baseFolderPath = directory;
+    showLoading('Opening remote recordings...', 'Preparing local playback and export');
+    try {
+        await traverseDirectoryElectron(directory);
+        library.folderLabel = `${source.remote}:${source.folder}`;
+        clipBrowserSubtitle.textContent = library.folderLabel;
+    } finally { hideLoading(); }
 });

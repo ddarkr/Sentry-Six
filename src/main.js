@@ -120,6 +120,7 @@ const activeExports = {};
 const activeExportPaths = {}; // Track output paths for cleanup on cancel
 const cancelledExports = new Set(); // Track cancelled exports by ID
 let mainWindow = null;
+let rcloneBrowser = null;
 
 // Session-scoped map provider fallback: set when any renderer window reports
 // that Google tile loads are failing, so export tile downloads follow the
@@ -1917,6 +1918,7 @@ app.whenReady().then(async () => {
   }
 
   createWindow();
+  rcloneBrowser = require('./main/rclone').registerRcloneIpc({ ipcMain, app, getMainWindow: () => mainWindow });
 
   // Pre-cache FFmpeg path in background after window is ready. preCacheFFmpegPath
   // is now async (uses spawn, not spawnSync) so the main-process event loop
@@ -2555,6 +2557,7 @@ ipcMain.handle('fs:showItemInFolder', async (_event, filePath) => {
 let pendingDeleteFolder = null;
 
 ipcMain.handle('fs:deleteFolder', async (_event, folderPath) => {
+  if (rcloneBrowser?.containsCachePath(folderPath)) return { success: false, error: 'Remote snapshots are read-only. The cache is cleared when the app exits.' };
   try {
     // Validate the path exists and is a directory
     if (!fs.existsSync(folderPath)) {
@@ -2586,6 +2589,7 @@ ipcMain.handle('fs:deleteFolder', async (_event, folderPath) => {
 
 // Schedule folder deletion and reload window to release file handles
 ipcMain.handle('fs:deleteFolderWithReload', async (_event, folderPath, baseFolderPath) => {
+  if (rcloneBrowser?.containsCachePath(folderPath)) return { success: false, error: 'Remote snapshots are read-only. The cache is cleared when the app exits.' };
   try {
     // Validate the path exists
     if (!fs.existsSync(folderPath)) {
