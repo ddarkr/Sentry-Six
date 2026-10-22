@@ -17,7 +17,8 @@ function fakeCli(replies) {
       if (reply?.hold) return;
       if (reply?.error) { child.emit('error', Object.assign(new Error('private secret'), { code: reply.error })); finish(1); return; }
       child.stdout.write(Buffer.from(typeof reply === 'string' ? reply : reply?.data || ''));
-      child.stderr.write('secret signed URL'); finish(reply?.code || 0);
+      for (const chunk of reply?.stderr || ['secret signed URL']) child.stderr.write(chunk);
+      finish(reply?.code || 0);
     });
     return child;
   });
@@ -72,22 +73,35 @@ describe('read-only remote browser', () => {
   });
   test('missing CLI errors are useful without leaking stderr', async () => {
     const [b] = browser([{ error: 'ENOENT' }]);
-    await expect(b.listRemotes()).rejects.toThrow('rclone was not found');
+    await expect(b.listRemotes()).rejects.toMatchObject({ code: 'NOT_INSTALLED' });
   });
   test('remote errors hide backend details', async () => {
     const [b] = browser([{ code: 1 }]);
-    await expect(b.listRemotes()).rejects.toThrow('Check connectivity');
+    const error = await b.listRemotes().catch(error => error);
+    expect(error.code).toBe('REMOTE_ERROR');
+    expect(error.message).not.toContain('secret signed URL');
+  });
+  test.each([
+    ['AUTH_REQUIRED', ['invalid_', 'grant: private-secret']],
+    ['NETWORK', ['dial tcp: private-secret']],
+    ['PERMISSION', ['insufficient permissions: private-secret']],
+    ['CONFIG_LOCKED', ['configuration file is encrypted: private-secret']]
+  ])('classifies %s without leaking private diagnostics', async (code, stderr) => {
+    const [b] = browser([{ code: 1, stderr }]);
+    const error = await b.listRemotes().catch(error => error);
+    expect(error.code).toBe(code);
+    expect(error.message).not.toContain('private-secret');
   });
   test('cancel kills active CLI and rejects concurrent operations', async () => {
     const [b] = browser([{ hold: true }]);
     const operation = b.listRemotes();
-    await expect(b.listRemotes()).rejects.toThrow('already running');
-    b.cancel(); await expect(operation).rejects.toThrow('cancelled');
+    await expect(b.listRemotes()).rejects.toMatchObject({ code: 'BUSY' });
+    b.cancel(); await expect(operation).rejects.toMatchObject({ code: 'CANCELLED' });
     expect(b.children.size).toBe(0);
   });
   test('timeouts stop stalled CLI', async () => {
     const [b] = browser([{ hold: true }], { timeoutMs: 10 });
-    await expect(b.listRemotes()).rejects.toThrow('timed out');
+    await expect(b.listRemotes()).rejects.toMatchObject({ code: 'TIMEOUT' });
   });
   test('IPC rejects unknown senders and subframes before touching the CLI', async () => {
     const handlers = {};
@@ -95,8 +109,21 @@ describe('read-only remote browser', () => {
     const webContents = { mainFrame: {} };
     const b = registerRcloneIpc({ ipcMain: { handle: (name, handler) => { handlers[name] = handler; } }, app, getMainWindow: () => ({ webContents }) });
     browsers.push(b);
-    await expect(handlers['rclone:remotes']({ sender: {}, senderFrame: {} })).rejects.toThrow('Untrusted');
-    await expect(handlers['rclone:remotes']({ sender: webContents, senderFrame: {} })).rejects.toThrow('Untrusted');
+    for (const handler of Object.values(handlers)) {
+      await expect(handler({ sender: {}, senderFrame: {} })).rejects.toThrow('Untrusted');
+      await expect(handler({ sender: webContents, senderFrame: {} })).rejects.toThrow('Untrusted');
+    }
+  });
+  test('trusted IPC returns actionable error codes without backend diagnostics', async () => {
+    const handlers = {};
+    const frame = { url: require('url').pathToFileURL(path.resolve(__dirname, '../../src/renderer/index.html')).href };
+    const webContents = { mainFrame: frame };
+    const b = registerRcloneIpc({ ipcMain: { handle: (name, handler) => { handlers[name] = handler; } }, app: { getPath: () => temp, on: jest.fn() }, getMainWindow: () => ({ webContents }) });
+    browsers.push(b);
+    b.spawn = fakeCli([{ code: 1, stderr: ['invalid_grant private-token'] }]);
+    const result = await handlers['rclone:remotes']({ sender: webContents, senderFrame: frame });
+    expect(result).toMatchObject({ ok: false, error: { code: 'AUTH_REQUIRED' } });
+    expect(JSON.stringify(result)).not.toContain('private-token');
   });
 });
 

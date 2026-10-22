@@ -41,6 +41,8 @@ function registerSettingsIpc() {
   });
 
   ipcMain.handle('settings:set', async (event, key, value) => {
+    // Executables can only be changed through the main-process native file picker.
+    if (key === 'rcloneExecutable') return false;
     const settings = loadSettings();
     settings[key] = value;
     return saveSettings(settings);

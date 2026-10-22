@@ -1,10 +1,28 @@
-// Read-only CLI adapter. No RC server, renderer credentials, or shell commands.
+// Read-only recordings plus explicit local connection configuration. No RC server or shell.
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { pathToFileURL } = require('url');
+const { RcloneConfig } = require('./rcloneConfig');
+const ERROR_MESSAGES = {
+  NOT_INSTALLED: 'rclone was not found. Select its executable or install rclone.',
+  AUTH_REQUIRED: 'This connection needs browser authentication again.',
+  NETWORK: 'The storage service could not be reached. Check the network connection.',
+  PERMISSION: 'Access was denied. Check folder access and local configuration permissions.',
+  CONFIG_LOCKED: 'The rclone configuration is locked or cannot be edited by this app.',
+  CONFIG_CONFLICT: 'The rclone configuration changed during sign-in. Please try again.',
+  UNSUPPORTED: 'This configuration step or rclone version is not supported.',
+  INVALID_INPUT: 'The requested connection or configuration value is invalid.',
+  BUSY: 'A remote operation is already running. Cancel it or wait.',
+  CANCELLED: 'Remote operation cancelled.',
+  TIMEOUT: 'Remote operation timed out.',
+  REMOTE_ERROR: 'rclone could not read this remote. Check connectivity, credentials, and folder access in rclone.'
+};
+function commandError(code) {
+  return Object.assign(new Error(ERROR_MESSAGES[code]), { code });
+}
 const CLIP = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-(front|back|left_repeater|right_repeater|left_pillar|right_pillar)\.mp4$/i;
 function safeName(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 255 &&
@@ -16,13 +34,13 @@ function validatePath(value) {
   return value;
 }
 class RcloneBrowser {
-  constructor({ cacheParent, spawnProcess = spawn, maxBytes = 2 * 1024 ** 3, timeoutMs = 600000 }) {
-    Object.assign(this, { cacheParent, spawn: spawnProcess, maxBytes, timeoutMs });
+  constructor({ cacheParent, spawnProcess = spawn, maxBytes = 2 * 1024 ** 3, timeoutMs = 600000, executable = 'rclone' }) {
+    Object.assign(this, { cacheParent, spawn: spawnProcess, maxBytes, timeoutMs, executable });
     this.remotes = new Set(); this.children = new Set(); this.bytes = 0;
   }
   async exclusive(fn) {
-    if (this.closed) throw new Error('Remote browser is closed.');
-    if (this.busy) throw new Error('A remote operation is already running. Cancel it or wait.');
+    if (this.closed) throw commandError('CANCELLED');
+    if (this.busy) throw commandError('BUSY');
     this.busy = true; this.cancelled = false;
     let finish;
     this.idle = new Promise(resolve => { finish = resolve; });
@@ -36,30 +54,42 @@ class RcloneBrowser {
     if (!this.remotes.has(remote)) throw new Error('Choose a configured remote first.');
     return `${remote}:${validatePath(folder)}`;
   }
-  command(args, onData) {
-    if (this.cancelled || this.closed) return Promise.reject(new Error('Remote operation cancelled.'));
+  command(args, onData, options = {}) {
+    if (this.cancelled || this.closed) return Promise.reject(commandError('CANCELLED'));
     return new Promise((resolve, reject) => {
-      const child = this.spawn('rclone', args, { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = this.spawn(this.executable, args, {
+        shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...(options.env ?? process.env), RCLONE_ASK_PASSWORD: 'false' }
+      });
       this.children.add(child);
-      let failure;
-      const timer = setTimeout(() => { failure = new Error('Remote operation timed out.'); child.kill('SIGKILL'); }, this.timeoutMs);
-      child.stderr.resume(); // Backend stderr can contain credentials or signed URLs; do not log/return it.
+      let failure, diagnosticTail = '';
+      const diagnostics = new Set();
+      const timer = setTimeout(() => { failure = commandError('TIMEOUT'); child.kill('SIGKILL'); }, options.timeoutMs ?? this.timeoutMs);
+      // Classify a bounded rolling window only. Never return or log backend stderr.
+      child.stderr.on('data', chunk => {
+        const text = diagnosticTail + chunk.toString('utf8');
+        if (/invalid_grant|invalid_token|empty token found|token.{0,40}(expired|revoked)|unauthenticated|401 unauthorized/i.test(text)) diagnostics.add('AUTH_REQUIRED');
+        if (/config.{0,50}(encrypted|password)|failed to decrypt|unable to decrypt/i.test(text)) diagnostics.add('CONFIG_LOCKED');
+        if (/permission denied|access denied|insufficient.{0,20}permission|403 forbidden/i.test(text)) diagnostics.add('PERMISSION');
+        if (/no such host|network is unreachable|connection refused|dial tcp|TLS handshake timeout|i\/o timeout/i.test(text)) diagnostics.add('NETWORK');
+        if (/unknown flag|unknown command/i.test(text)) diagnostics.add('UNSUPPORTED');
+        diagnosticTail = text.slice(-1024);
+      });
       const output = Promise.resolve().then(() => onData(child.stdout)).catch(error => { failure = error; child.kill('SIGKILL'); });
       child.once('error', error => {
-        failure = new Error(error.code === 'ENOENT'
-          ? 'rclone was not found. Install rclone yourself and configure a remote on this computer, then restart Sentry Studio. GUI apps need rclone on their PATH.'
-          : 'Could not start rclone. Check its installation and permissions.');
+        failure = commandError(error.code === 'ENOENT' ? 'NOT_INSTALLED' : error.code === 'EACCES' ? 'PERMISSION' : 'REMOTE_ERROR');
       });
       child.once('close', async code => {
         clearTimeout(timer); this.children.delete(child); await output;
-        if (this.cancelled || this.closed) reject(new Error('Remote operation cancelled.'));
+        diagnosticTail = '';
+        if (this.cancelled || this.closed) reject(commandError('CANCELLED'));
         else if (failure) reject(failure);
-        else if (code !== 0) reject(new Error('rclone could not read this remote. Check connectivity, credentials, and folder access in rclone.'));
+        else if (code !== 0) reject(commandError(['CONFIG_LOCKED', 'AUTH_REQUIRED', 'PERMISSION', 'NETWORK', 'UNSUPPORTED'].find(value => diagnostics.has(value)) || 'REMOTE_ERROR'));
         else resolve();
       });
     });
   }
-  async text(args) {
+  async text(args, options) {
     const chunks = []; let bytes = 0;
     await this.command(args, async stream => {
       for await (const chunk of stream) {
@@ -67,7 +97,7 @@ class RcloneBrowser {
         if (bytes > 4 * 1024 ** 2) throw new Error('Folder listing is too large. Choose a smaller folder.');
         chunks.push(chunk);
       }
-    });
+    }, options);
     return Buffer.concat(chunks).toString('utf8');
   }
   listRemotes() {
@@ -161,25 +191,69 @@ class RcloneBrowser {
     if (!this.busy) this.cleanup();
   }
 }
-function registerRcloneIpc({ ipcMain, app, getMainWindow }) {
-  const browser = new RcloneBrowser({ cacheParent: app.getPath('temp') });
-  const invoke = fn => async (event, ...args) => {
+function registerRcloneIpc({ ipcMain, app, getMainWindow, executable = 'rclone' }) {
+  const browser = new RcloneBrowser({ cacheParent: app.getPath('temp'), executable });
+  const config = new RcloneConfig(browser, { cacheParent: app.getPath('temp') });
+  let choosingExecutable = false;
+  const invoke = (fn, browsing = false) => async (event, ...args) => {
     const window = getMainWindow();
     if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame ||
         event.senderFrame.url !== pathToFileURL(path.join(__dirname, '../renderer/index.html')).href) throw new Error('Untrusted remote browser request.');
-    return fn(...args);
-  };
-  ipcMain.handle('rclone:remotes', invoke(() => browser.listRemotes()));
-  ipcMain.handle('rclone:list', invoke((remote, folder) => browser.list(remote, folder)));
-  ipcMain.handle('rclone:open', invoke((remote, folder) => browser.materialize(remote, folder)));
-  ipcMain.handle('rclone:cancel', invoke(() => browser.cancel()));
-  app.on('before-quit', () => browser.cancel());
-  app.on('will-quit', event => {
-    browser.dispose();
-    if (browser.busy) {
-      event.preventDefault();
-      browser.idle.then(() => app.quit());
+    try {
+      if (browsing && (config.active || choosingExecutable)) throw commandError('BUSY');
+      return { ok: true, data: (await fn(...args)) ?? null };
+    } catch (error) {
+      const code = Object.hasOwn(ERROR_MESSAGES, error.code) ? error.code : 'REMOTE_ERROR';
+      return { ok: false, error: { code, message: ERROR_MESSAGES[code] } };
     }
+  };
+  ipcMain.handle('rclone:remotes', invoke(() => browser.listRemotes(), true));
+  ipcMain.handle('rclone:list', invoke((remote, folder) => browser.list(remote, folder), true));
+  ipcMain.handle('rclone:open', invoke((remote, folder) => browser.materialize(remote, folder), true));
+  ipcMain.handle('rclone:cancel', invoke(() => { if (!config.active) browser.cancel(); }));
+  ipcMain.handle('rclone:status', invoke(() => config.status(), true));
+  ipcMain.handle('rclone:check', invoke(remote => config.check(remote), true));
+  ipcMain.handle('rclone:configure', invoke(request => config.configure(request), true));
+  ipcMain.handle('rclone:configContinue', invoke(request => config.continue(request)));
+  ipcMain.handle('rclone:configCancel', invoke(() => config.cancel()));
+  ipcMain.handle('rclone:chooseExecutable', invoke(async () => {
+    if (browser.busy) throw commandError('BUSY');
+    choosingExecutable = true;
+    const previous = browser.executable;
+    try {
+      const { dialog } = require('electron');
+      const result = await dialog.showOpenDialog(getMainWindow(), { title: 'Choose rclone executable', properties: ['openFile'] });
+      if (result.canceled || !result.filePaths[0]) return null;
+      const selected = result.filePaths[0];
+      if (!(await fs.promises.stat(selected)).isFile()) throw commandError('INVALID_INPUT');
+      await fs.promises.access(selected, process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK);
+      browser.executable = selected;
+      const status = await config.status();
+      if (!status.installed) throw commandError('NOT_INSTALLED');
+      const { loadSettings, saveSettings } = require('./settings');
+      if (!saveSettings({ ...loadSettings(), rcloneExecutable: selected })) throw commandError('PERMISSION');
+      browser.remotes.clear();
+      return status;
+    } catch (error) {
+      browser.executable = previous;
+      throw error;
+    } finally { choosingExecutable = false; }
+  }, true));
+  let stopping = false, stopped = false;
+  app.on('before-quit', event => {
+    if (stopped) return;
+    event.preventDefault();
+    if (stopping) return;
+    stopping = true;
+    browser.cancel();
+    Promise.resolve(config.dispose()).catch(() => {
+      console.warn('[RCLONE] Could not remove configuration staging files.');
+    }).then(async () => {
+      browser.dispose();
+      await browser.idle;
+      stopped = true;
+      app.quit();
+    });
   });
   return browser;
 }

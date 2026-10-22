@@ -1918,7 +1918,10 @@ app.whenReady().then(async () => {
   }
 
   createWindow();
-  rcloneBrowser = require('./main/rclone').registerRcloneIpc({ ipcMain, app, getMainWindow: () => mainWindow });
+  rcloneBrowser = require('./main/rclone').registerRcloneIpc({
+    ipcMain, app, getMainWindow: () => mainWindow,
+    executable: loadSettings().rcloneExecutable || 'rclone'
+  });
 
   // Pre-cache FFmpeg path in background after window is ready. preCacheFFmpegPath
   // is now async (uses spawn, not spawnSync) so the main-process event loop

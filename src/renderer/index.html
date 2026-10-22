@@ -157,6 +157,12 @@
                             data-i18n-title="ui.clipBrowser.chooseFolder" title="Choose Folder">
                             <span class="material-symbols-outlined mi-md">folder_open</span>
                         </button>
+                        <button id="rcloneOpenButton" class="icon-btn" type="button" hidden
+                            aria-label="Remote folders" title="Remote folders" data-i18n-title="ui.rclone.entry">
+                            <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+                                <path d="M6 18a5 5 0 0 1-.8-9.94 7 7 0 0 1 13.5 1.5A4.25 4.25 0 0 1 18.75 18H6Zm0-2h12.75a2.25 2.25 0 0 0-.8-4.35l-1.05.05-.1-1.05a5 5 0 0 0-9.95-.5l-.12.9-.91-.03A3 3 0 0 0 6 16Z" />
+                            </svg>
+                        </button>
                     </div>
                 </div>
                 <!-- Tab bar - always visible -->
@@ -2371,6 +2377,9 @@
                                 <button id="clearDriveDataFileBtn" class="btn btn-secondary btn-small" title="Clear">✕</button>
                             </div>
                             <div id="driveDataFileStatus" class="folder-status"></div>
+                            <!-- Cloud Storage (rclone) Section -->
+                            <div class="settings-sub-label" style="margin-top:20px;margin-bottom:8px;font-size:11px;opacity:0.6;text-transform:uppercase;letter-spacing:0.05em;" data-i18n="ui.rclone.cloudStorage">Cloud Storage (rclone)</div>
+                            <div id="rcloneSettingsContainer" class="rclone-settings-container"></div>
                         </div>
                     </div>
 

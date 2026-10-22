@@ -3671,7 +3671,8 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     align-items: center;
 }
 
-.input-row .text-input {
+.input-row .text-input,
+.settings-modal .rclone-add-form .text-input {
     flex: 1;
     padding: 8px 12px;
     background: var(--input-bg);
@@ -3682,12 +3683,14 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     font-family: var(--font-mono);
 }
 
-.input-row .text-input:focus {
+.input-row .text-input:focus,
+.settings-modal .rclone-add-form .text-input:focus {
     outline: none;
     border-color: var(--accent-color);
 }
 
-.input-row .text-input::placeholder {
+.input-row .text-input::placeholder,
+.settings-modal .rclone-add-form .text-input::placeholder {
     color: var(--text-faint);
 }
 
@@ -6959,6 +6962,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 /* Input rows with focus glow */
 .settings-modal .input-row .text-input:focus,
+.settings-modal .rclone-add-form .text-input:focus,
 .dev-modal .input-row .text-input:focus {
     border-color: var(--settings-accent);
     box-shadow: 0 0 0 3px var(--settings-accent-soft);
@@ -7890,4 +7894,652 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     pointer-events: none; /* belt + suspenders alongside `inert` */
     transition: opacity 0.15s ease;
 }
+}
+
+/* Remote folder browser: native modal positioning and app glass controls. */
+#rcloneOpenButton[hidden] { display: none; }
+.rclone-dialog {
+    position: fixed;
+    inset: 0;
+    margin: auto;
+    padding: 0;
+    width: min(640px, calc(100vw - 32px));
+    max-width: none;
+    max-height: min(620px, calc(100dvh - 40px));
+    box-sizing: border-box;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--border-strong);
+    border-radius: 16px;
+    background: var(--modal-bg);
+    backdrop-filter: blur(24px) saturate(var(--glass-saturate));
+    color: var(--text-color);
+    font: inherit;
+    box-shadow: 0 24px 80px var(--shadow-strong);
+    color-scheme: dark;
+}
+.rclone-dialog:not([open]) { display: none; }
+.rclone-dialog[open] { display: flex; }
+.rclone-dialog::backdrop {
+    background: var(--overlay-bg);
+    backdrop-filter: blur(5px);
+}
+.rclone-dialog .modal-header { flex: 0 0 auto; gap: 12px; }
+.rclone-dialog .modal-header h2 { margin: 0; font-size: 16px; }
+.rclone-dialog .rclone-body {
+    padding: 18px 20px;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+.rclone-description, .rclone-safety {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+}
+.rclone-storage {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px 8px;
+    align-items: center;
+}
+.rclone-storage label {
+    width: 100%;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+}
+.rclone-storage select {
+    flex: 1;
+    min-width: 140px;
+    height: 36px;
+    padding: 0 10px;
+    border: 1px solid var(--input-border);
+    border-radius: 8px;
+    background: var(--input-bg);
+    color: var(--text-color);
+    font: inherit;
+    font-size: 12px;
+    text-overflow: ellipsis;
+}
+.rclone-dialog .btn { min-height: 36px; font-size: 12px; white-space: nowrap; }
+.rclone-navigation { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.rclone-location {
+    margin: 0;
+    min-width: 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.rclone-status { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-secondary); overflow-wrap: anywhere; }
+.rclone-status[data-state="ready"] { color: var(--accent-color); }
+.rclone-status[data-state="error"] { color: var(--error-color); }
+.rclone-status[data-state="loading"] { display: flex; align-items: center; gap: 8px; }
+.rclone-status[data-state="loading"]::before {
+    content: "";
+    width: 11px;
+    height: 11px;
+    flex: 0 0 auto;
+    border: 2px solid var(--border-strong);
+    border-top-color: var(--accent-color);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+.rclone-list {
+    overflow-y: auto;
+    min-height: 100px;
+    max-height: 260px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    background: var(--input-bg);
+    scrollbar-width: thin;
+}
+.rclone-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 42px;
+    padding: 10px 12px;
+    border: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    background: transparent;
+    color: var(--text-color);
+    text-align: left;
+    font: inherit;
+    font-size: 12px;
+}
+.rclone-row:last-child { border-bottom: 0; }
+button.rclone-row { cursor: pointer; }
+button.rclone-row:hover { background: var(--surface-hover); }
+button.rclone-row:active, .rclone-dialog .btn:active { background: var(--surface-active); }
+.rclone-row svg { width: 18px; height: 18px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.5; color: var(--text-secondary); }
+.rclone-row-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rclone-row-size { color: var(--text-secondary); font-size: 11px; white-space: nowrap; }
+.rclone-dialog .rclone-footer { display: flex; align-items: center; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--border-subtle); flex: 0 0 auto; }
+.rclone-safety { margin-right: auto; font-size: 11px; }
+.rclone-dialog :is(button, select):focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2px; }
+.rclone-dialog :is(button, select):disabled { opacity: 0.4; cursor: not-allowed; }
+.rclone-error-details { font-size: 11px; color: var(--text-secondary); }
+.rclone-error-details[hidden] { display: none; }
+.rclone-error-details summary { cursor: pointer; }
+.rclone-error-details p { max-height: 70px; overflow: auto; overflow-wrap: anywhere; margin: 8px 0 0; }
+@media (max-width: 480px) {
+    .rclone-dialog { width: calc(100vw - 24px); max-height: calc(100dvh - 24px); border-radius: 12px; }
+    .rclone-dialog .modal-header { padding: 14px; }
+    .rclone-dialog .rclone-body { padding: 14px; gap: 12px; }
+    .rclone-dialog .rclone-footer { padding: 12px 14px; flex-wrap: wrap; }
+    .rclone-safety { flex-basis: 100%; }
+    .rclone-dialog .rclone-footer .btn { flex: 1; }
+    .rclone-navigation { gap: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .rclone-status[data-state="loading"]::before,
+    .rclone-spinner { animation: none !important; }
+}
+
+/* Rclone Connection Management & Settings */
+.rclone-auth-action {
+    align-self: flex-start;
+    margin-top: 4px;
+}
+
+.rclone-settings-container {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 6px;
+    font-size: 12px;
+}
+
+.rclone-status-card,
+.rclone-remote-card,
+.rclone-add-drive-card,
+.rclone-auth-panel {
+    background: var(--surface-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    box-sizing: border-box;
+}
+
+.rclone-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.rclone-card-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-color);
+}
+
+.rclone-card-desc {
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+.rclone-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.3;
+    white-space: nowrap;
+}
+
+.rclone-status-badge.installed,
+.rclone-status-badge.connected {
+    background: rgba(52, 211, 153, 0.15);
+    color: var(--success-color);
+    border: 1px solid rgba(52, 211, 153, 0.25);
+}
+
+.rclone-status-badge.not-installed,
+.rclone-status-badge.error {
+    background: rgba(248, 113, 113, 0.15);
+    color: var(--error-color);
+    border: 1px solid rgba(248, 113, 113, 0.25);
+}
+
+.rclone-status-badge.auth-required {
+    background: rgba(251, 191, 36, 0.15);
+    color: var(--warning-color);
+    border: 1px solid rgba(251, 191, 36, 0.25);
+}
+
+.rclone-status-badge.checking {
+    background: rgba(56, 189, 248, 0.15);
+    color: var(--info-color);
+    border: 1px solid rgba(56, 189, 248, 0.25);
+}
+
+.rclone-status-badge.unchecked {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-muted);
+    border: 1px solid var(--border-subtle);
+}
+
+.rclone-status-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.rclone-path-text {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 260px;
+}
+
+.rclone-install-link {
+    color: var(--accent-color);
+    text-decoration: underline;
+    cursor: pointer;
+    font-size: 11px;
+}
+.rclone-install-link:hover {
+    color: var(--accent-solid-hover);
+}
+
+.rclone-remotes-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.rclone-empty-remotes {
+    padding: 12px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 11px;
+    background: var(--surface-raised);
+    border: 1px dashed var(--border-subtle);
+    border-radius: 8px;
+}
+
+.rclone-remote-card {
+    transition: border-color 0.15s ease;
+}
+.rclone-remote-card.highlight {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 12px var(--accent-glow);
+}
+
+.rclone-remote-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+}
+
+.rclone-remote-info {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    flex: 1;
+}
+
+.rclone-remote-name {
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--text-color);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 180px;
+    min-width: 0;
+}
+
+.rclone-type-badge {
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.rclone-source-badge {
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 9px;
+    background: rgba(251, 191, 36, 0.15);
+    color: var(--warning-color);
+    flex-shrink: 0;
+}
+
+.rclone-remote-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 2px;
+}
+
+.rclone-remote-actions .btn {
+    min-height: 28px;
+    font-size: 11px;
+    padding: 2px 10px;
+    white-space: nowrap;
+}
+
+.rclone-remote-error {
+    font-size: 11px;
+    color: var(--error-color);
+    line-height: 1.4;
+    word-break: break-word;
+}
+
+.rclone-add-form {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.rclone-add-form input {
+    flex: 1;
+    min-width: 140px;
+    height: 32px;
+}
+
+.rclone-form-feedback {
+    font-size: 11px;
+    line-height: 1.4;
+}
+.rclone-form-feedback.success { color: var(--success-color); }
+.rclone-form-feedback.error { color: var(--error-color); }
+
+.rclone-auth-panel {
+    background: rgba(16, 20, 27, 0.95);
+    border: 1px solid var(--accent-glow);
+}
+
+.rclone-auth-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.rclone-spinner {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 auto;
+    border: 2px solid var(--border-strong);
+    border-top-color: var(--accent-color);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+.rclone-auth-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-color);
+}
+
+.rclone-question-container {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    border-radius: 6px;
+}
+
+.rclone-question-label {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.rclone-auth-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.rclone-settings-container :is(button, input, select):focus-visible {
+    outline: 2px solid var(--accent-color);
+    outline-offset: 2px;
+}
+
+/* ============================================================
+   Settings Modal Responsive Layout (<=600px)
+   ============================================================ */
+@media (max-width: 600px) {
+    .settings-modal {
+        width: calc(100vw - 20px) !important;
+        max-width: 100% !important;
+        max-height: calc(100dvh - 20px);
+        border-radius: 16px;
+    }
+
+    .settings-modal .modal-header {
+        padding: 12px 14px;
+    }
+
+    .settings-modal .modal-footer {
+        padding: 12px 14px;
+    }
+
+    .settings-modal .settings-horizontal-body {
+        flex-direction: column;
+        max-height: calc(100dvh - 120px);
+    }
+
+    .settings-modal .settings-sidebar {
+        width: 100%;
+        min-width: 0;
+        padding: 10px 12px 8px;
+        border-right: none;
+        border-bottom: 1px solid var(--border-subtle);
+        flex-shrink: 0;
+        overflow: visible;
+        gap: 6px;
+    }
+
+    .settings-modal .settings-sidebar .settings-search-wrapper {
+        margin-bottom: 2px;
+    }
+
+    .settings-modal .settings-sidebar .settings-search-input {
+        padding: 6px 24px 6px 28px;
+        font-size: 11px;
+    }
+
+    .settings-modal .settings-sidebar .settings-search-icon {
+        width: 12px;
+        height: 12px;
+        left: 8px;
+    }
+
+    .settings-modal .settings-nav {
+        flex-direction: row;
+        gap: 4px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        white-space: nowrap;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 2px;
+    }
+
+    .settings-modal .settings-nav::-webkit-scrollbar {
+        display: none;
+    }
+
+    .settings-modal .settings-nav-item {
+        flex: 0 0 auto;
+        padding: 6px 10px;
+        font-size: 11px;
+        white-space: nowrap;
+    }
+
+    .settings-modal .settings-nav-item svg {
+        width: 14px;
+        height: 14px;
+    }
+
+    .settings-modal .settings-content {
+        min-width: 0;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 12px 14px;
+    }
+
+    .settings-modal .settings-accordion .settings-accordion-body {
+        min-width: 0;
+        width: 100%;
+        box-sizing: border-box;
+    }
+
+    .settings-modal .settings-accordion .input-row {
+        padding: 0;
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+
+    .settings-modal .settings-accordion .input-row .text-input {
+        min-width: 0;
+        flex: 1 1 100%;
+        box-sizing: border-box;
+    }
+
+    .settings-modal .settings-accordion .input-row .btn {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    .settings-modal .settings-accordion .input-row .btn[title="Clear"] {
+        flex: 0 0 32px;
+    }
+
+    .settings-modal .settings-accordion .action-row,
+    .settings-modal .settings-accordion .toggle-row,
+    .settings-modal .settings-accordion .select-row,
+    .settings-modal .settings-accordion .slider-row,
+    .settings-modal .settings-accordion .about-version-row {
+        min-width: 0;
+        box-sizing: border-box;
+    }
+
+    .settings-modal .settings-accordion .keybind-row-compact {
+        padding: 6px 0;
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+
+    .settings-modal .rclone-settings-container {
+        min-width: 0;
+        width: 100%;
+        box-sizing: border-box;
+    }
+
+    .settings-modal .rclone-status-card,
+    .settings-modal .rclone-remote-card,
+    .settings-modal .rclone-add-drive-card,
+    .settings-modal .rclone-auth-panel {
+        min-width: 0;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 10px 12px;
+    }
+
+    .settings-modal .rclone-remote-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
+    }
+
+    .settings-modal .rclone-remote-info {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .settings-modal .rclone-remote-name {
+        max-width: 100%;
+        min-width: 0;
+        flex: 1;
+    }
+
+    .settings-modal .rclone-remote-actions {
+        width: 100%;
+        justify-content: flex-start;
+        gap: 6px;
+    }
+
+    .settings-modal .rclone-remote-actions .btn {
+        flex: 1 1 auto;
+        text-align: center;
+        justify-content: center;
+    }
+
+    .settings-modal .rclone-path-text {
+        max-width: 100%;
+        min-width: 0;
+        word-break: break-all;
+    }
+
+    .settings-modal .rclone-add-form {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 6px;
+        width: 100%;
+    }
+
+    .settings-modal .rclone-add-form input {
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+    }
+
+    .settings-modal .rclone-add-form button {
+        width: 100%;
+        justify-content: center;
+    }
+
+    .settings-modal .rclone-auth-actions {
+        flex-wrap: wrap;
+        width: 100%;
+    }
+
+    .settings-modal .rclone-auth-actions .btn {
+        flex: 1 1 auto;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .settings-modal .settings-nav-item {
+        transition: none !important;
+    }
 }

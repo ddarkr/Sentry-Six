@@ -7,6 +7,77 @@ import { initKeybindSettings } from '../lib/keybinds.js';
 import { getCurrentLanguage, setLanguage, getAvailableLanguages, onLanguageChange, t } from '../lib/i18n.js';
 import { initFeatureBadges, FEATURE_BADGE_KEYS } from '../features/exportVideo.js';
 import { setMapTileProvider, getSelectedProviderId } from './mapTiles.js';
+import { initRcloneSettings, onOpenRcloneSettings, onCloseRcloneSettings, cancelConfigSession, getNewConfiguredRemoteThisVisit } from '../features/rcloneSettings.js';
+
+let activeReturnCallback = null;
+let openRcloneBrowserCallback = null;
+
+export function registerRcloneBrowserOpener(fn) {
+    openRcloneBrowserCallback = fn;
+}
+
+/**
+ * Open settings modal to a specific section and optional selected remote
+ * @param {string} section - Target section (e.g. 'display', 'storage')
+ * @param {string|null} selectedRemote - Remote name to focus
+ * @param {Object} options - Options including onReturn callback and reconnect flag
+ */
+export function openSettingsModal(section = 'display', selectedRemote = null, options = {}) {
+    const settingsModal = $('settingsModal');
+    if (!settingsModal) return;
+
+    activeReturnCallback = options.onReturn || null;
+
+    const currentState = getState?.();
+    const currentUseMetric = getUseMetric?.();
+    const settingsDashboardToggle = $('settingsDashboardToggle');
+    const settingsMapToggle = $('settingsMapToggle');
+    const settingsMetricToggle = $('settingsMetricToggle');
+    if (settingsDashboardToggle && currentState) settingsDashboardToggle.checked = currentState.ui.dashboardEnabled;
+    if (settingsMapToggle && currentState) settingsMapToggle.checked = currentState.ui.mapEnabled;
+    if (settingsMetricToggle) settingsMetricToggle.checked = currentUseMetric;
+
+    // Sync map mode dropdown
+    const settingsMapMode = $('settingsMapMode');
+    if (settingsMapMode) settingsMapMode.value = window._mapDarkMode ? 'dark' : 'light';
+
+    // Sync map provider dropdown
+    const settingsMapProviderEl = $('settingsMapProvider');
+    if (settingsMapProviderEl) settingsMapProviderEl.value = getSelectedProviderId();
+
+    // Sync layout style toggle
+    const settingsLayoutStyle = $('settingsLayoutStyle');
+    if (settingsLayoutStyle) {
+        const currentStyle = getLayoutStyle?.() || 'modern';
+        settingsLayoutStyle.checked = currentStyle === 'classic';
+    }
+
+    const disableAutoUpdate = $('settingsDisableAutoUpdate');
+    if (disableAutoUpdate && window.electronAPI?.getSetting) {
+        window.electronAPI.getSetting('disableAutoUpdate').then(savedValue => {
+            disableAutoUpdate.checked = savedValue === true;
+        });
+    }
+
+    // Switch section tab & accordion
+    const navItems = settingsModal.querySelectorAll('.settings-nav-item');
+    const accordions = settingsModal.querySelectorAll('.settings-accordion');
+    navItems.forEach(n => {
+        n.classList.toggle('active', n.dataset.target === section);
+    });
+    accordions.forEach(acc => {
+        acc.classList.toggle('open', acc.dataset.section === section);
+    });
+
+    const content = settingsModal.querySelector('.settings-content');
+    if (content) content.scrollTop = 0;
+
+    settingsModal.classList.remove('hidden');
+
+    if (section === 'storage') {
+        onOpenRcloneSettings(selectedRemote, options);
+    }
+}
 
 
 /**
@@ -87,6 +158,10 @@ export function initSettingsModal() {
                 // Scroll content to top
                 const content = settingsModal.querySelector('.settings-content');
                 if (content) content.scrollTop = 0;
+
+                if (target === 'storage') {
+                    onOpenRcloneSettings();
+                }
             });
         });
     }
@@ -135,43 +210,19 @@ export function initSettingsModal() {
     if (settingsBtn) {
         settingsBtn.onclick = (e) => {
             e.preventDefault();
-            if (settingsModal) {
-                const currentState = getState?.();
-                const currentUseMetric = getUseMetric?.();
-                if (settingsDashboardToggle && currentState) settingsDashboardToggle.checked = currentState.ui.dashboardEnabled;
-                if (settingsMapToggle && currentState) settingsMapToggle.checked = currentState.ui.mapEnabled;
-                if (settingsMetricToggle) settingsMetricToggle.checked = currentUseMetric;
-
-                // Sync map mode dropdown
-                const settingsMapMode = $('settingsMapMode');
-                if (settingsMapMode) settingsMapMode.value = window._mapDarkMode ? 'dark' : 'light';
-
-                // Sync map provider dropdown
-                const settingsMapProviderEl = $('settingsMapProvider');
-                if (settingsMapProviderEl) settingsMapProviderEl.value = getSelectedProviderId();
-
-                // Sync layout style toggle
-                const settingsLayoutStyle = $('settingsLayoutStyle');
-                if (settingsLayoutStyle) {
-                    const currentStyle = getLayoutStyle?.() || 'modern';
-                    settingsLayoutStyle.checked = currentStyle === 'classic';
-                }
-
-                const disableAutoUpdate = $('settingsDisableAutoUpdate');
-                if (disableAutoUpdate && window.electronAPI?.getSetting) {
-                    window.electronAPI.getSetting('disableAutoUpdate').then(savedValue => {
-                        disableAutoUpdate.checked = savedValue === true;
-                    });
-                }
-
-                settingsModal.classList.remove('hidden');
-            }
+            openSettingsModal('display');
             settingsBtn.blur();
         };
     }
 
-    function closeSettings() {
+    async function closeSettings() {
+        const cb = activeReturnCallback;
+        activeReturnCallback = null;
         if (settingsModal) settingsModal.classList.add('hidden');
+        await onCloseRcloneSettings();
+        if (cb) {
+            cb(getNewConfiguredRemoteThisVisit());
+        }
     }
 
     if (closeSettingsModal) closeSettingsModal.onclick = closeSettings;
@@ -182,6 +233,25 @@ export function initSettingsModal() {
             if (e.target === settingsModal) closeSettings();
         };
     }
+
+    window.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && settingsModal && !settingsModal.classList.contains('hidden')) {
+            e.stopPropagation();
+            closeSettings();
+        }
+    });
+
+    // Initialize Cloud Storage (rclone) settings
+    initRcloneSettings({
+        onOpenRemoteFolder: async (remoteName) => {
+            activeReturnCallback = null;
+            if (settingsModal) settingsModal.classList.add('hidden');
+            await onCloseRcloneSettings();
+            if (openRcloneBrowserCallback) {
+                openRcloneBrowserCallback(remoteName);
+            }
+        }
+    });
 
     // Dashboard toggle
     if (settingsDashboardToggle) {
