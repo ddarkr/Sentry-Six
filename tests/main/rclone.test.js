@@ -6,6 +6,7 @@ const { PassThrough } = require('stream');
 const { RcloneBrowser, safeName, validatePath, registerRcloneIpc } = require('../../src/main/rclone');
 const filename = '2026-10-09_12-30-00-front.mp4';
 const entry = (Name, Size = 4, IsDir = false) => ({ Name, Path: Name, Size, IsDir });
+const localRemote = JSON.stringify([{ name: 'cloud', type: 'local' }]);
 function fakeCli(replies) {
   return jest.fn((exe, args, options) => {
     const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
@@ -13,11 +14,12 @@ function fakeCli(replies) {
     const finish = code => { if (closed) return; closed = true; child.stdout.end(); child.stderr.end(); setImmediate(() => child.emit('close', code)); };
     child.kill = jest.fn(() => finish(1));
     process.nextTick(() => {
-      const reply = replies.shift();
+      const next = replies.shift();
+      const reply = typeof next === 'function' ? next(args) : next;
+      for (const chunk of reply?.stderr || []) child.stderr.write(chunk);
       if (reply?.hold) return;
       if (reply?.error) { child.emit('error', Object.assign(new Error('private secret'), { code: reply.error })); finish(1); return; }
       child.stdout.write(Buffer.from(typeof reply === 'string' ? reply : reply?.data || ''));
-      for (const chunk of reply?.stderr || ['secret signed URL']) child.stderr.write(chunk);
       finish(reply?.code || 0);
     });
     return child;
@@ -33,7 +35,7 @@ describe('read-only remote browser', () => {
     return [b, spawnProcess];
   }
   test('discovers configured remotes only, not inline backend configs', async () => {
-    const [b] = browser(['cloud:\n:local:\n--config evil:\nx:\n']);
+    const [b] = browser([JSON.stringify(['cloud', ':local', '--config evil', 'x'].map(name => ({ name, type: 'local' })))]);
     expect(await b.listRemotes()).toEqual(['cloud']);
     await expect(b.list(':local', '')).rejects.toThrow('configured');
   });
@@ -45,44 +47,104 @@ describe('read-only remote browser', () => {
     expect(validatePath('TeslaCam/SavedClips')).toBe('TeslaCam/SavedClips');
   });
   test('downloads snapshot with original basename for local seek/export and no remote writes', async () => {
-    const [b, spawn] = browser(['cloud:\n', JSON.stringify([entry(filename), entry('ignored.txt')]), 'mp4!']);
-    await b.listRemotes(); const result = await b.materialize('cloud', 'TeslaCam/event');
+    const [b, spawn] = browser([localRemote, JSON.stringify([entry(filename), entry('ignored.txt'), entry('ignored.txt'), entry('../ignored')]), 'mp4!']);
+    await b.listRemotes(); const result = await b.materialize('cloud', '');
     expect(fs.readFileSync(path.join(result.directory, filename), 'utf8')).toBe('mp4!');
-    expect(result.source).toEqual({ kind: 'rclone', remote: 'cloud', folder: 'TeslaCam/event' });
-    expect(spawn.mock.calls.map(c => c[1][0])).toEqual(['listremotes', 'lsjson', 'cat']);
+    expect(result.source).toEqual({ kind: 'rclone', remote: 'cloud', folder: '' });
     for (const call of spawn.mock.calls) expect(call[2].shell).toBe(false);
-    expect(spawn.mock.calls[2][1]).toEqual(['cat', '--max-depth', '1', '--', `cloud:TeslaCam/event/${filename}`]);
     const root = b.root; b.dispose(); expect(fs.existsSync(root)).toBe(false);
   });
   test('quota checks before downloading, preserves earlier playable cache', async () => {
-    const [b, spawn] = browser(['cloud:\n', JSON.stringify([entry(filename)]), 'mp4!', JSON.stringify([entry(filename)])], { maxBytes: 6 });
-    await b.listRemotes(); const first = await b.materialize('cloud', 'one');
-    await expect(b.materialize('cloud', 'two')).rejects.toThrow('limit');
+    const [b, spawn] = browser([localRemote, JSON.stringify([entry(filename)]), 'mp4!', JSON.stringify([entry(filename)])], { maxBytes: 6 });
+    await b.listRemotes(); const first = await b.materialize('cloud', '');
+    await expect(b.materialize('cloud', '')).rejects.toThrow('limit');
     expect(spawn.mock.calls.filter(c => c[1][0] === 'cat')).toHaveLength(1);
     expect(fs.existsSync(path.join(first.directory, filename))).toBe(true);
   });
   test.each(['too much data', 'x'])('cleans incomplete or oversized transfers', async data => {
-    const [b] = browser(['cloud:\n', JSON.stringify([entry(filename)]), data]);
+    const [b] = browser([localRemote, JSON.stringify([entry(filename)]), data]);
     await b.listRemotes(); await expect(b.materialize('cloud', '')).rejects.toThrow('changed size');
     expect(fs.readdirSync(b.root)).toEqual([]); expect(b.bytes).toBe(0);
   });
-  test('rejects unsafe and case-colliding remote names', async () => {
-    const [b] = browser(['cloud:\n', JSON.stringify([entry('../oops')]), JSON.stringify([entry('a'), entry('A')])]);
-    await b.listRemotes(); await expect(b.list('cloud', '')).rejects.toThrow('unsupported');
-    await expect(b.list('cloud', '')).rejects.toThrow('duplicate');
+  test.each([filename, filename.toUpperCase()])('rejects conflicting recording %s only at download', async duplicate => {
+    const listing = JSON.stringify([entry(filename), entry(duplicate)]);
+    const [b, spawn] = browser([localRemote, listing, listing]);
+    await b.listRemotes();
+    expect((await b.list('cloud', '')).map(row => row.name)).toEqual([filename, duplicate]);
+    await expect(b.materialize('cloud', '')).rejects.toMatchObject({ code: 'DUPLICATE_FILES' });
+    expect(spawn.mock.calls.some(call => call[1][0] === 'cat')).toBe(false);
+    expect(b.root).toBeUndefined();
+  });
+  test('same-name Drive directories select and download from their own IDs', async () => {
+    const directories = [
+      { ...entry('Same / folder:', 0, true), ID: 'folder-a' },
+      { ...entry('Same / folder:', 0, true), ID: 'folder-b' }
+    ];
+    const [b] = browser([
+      JSON.stringify([{ name: 'cloud', type: 'drive' }]),
+      JSON.stringify(directories),
+      args => JSON.stringify([entry(args.includes('folder-a') ? 'first.txt' : 'wrong.txt')]),
+      args => JSON.stringify([entry(args.includes('folder-b') ? filename : 'wrong.txt')]),
+      args => args.includes('folder-b') ? 'mp4!' : 'oops'
+    ]);
+    await b.listRemotes();
+    const folders = await b.list('cloud', '');
+    expect(folders[0].folder).not.toBe(folders[1].folder);
+    expect((await b.list('cloud', folders[0].folder))[0].name).toBe('first.txt');
+    const opened = await b.materialize('cloud', folders[1].folder);
+    expect(fs.readFileSync(path.join(opened.directory, filename), 'utf8')).toBe('mp4!');
+    expect(opened.source.folder).toBe('Same / folder:');
+  });
+  test('Drive directory shortcuts use target IDs, not ambiguous names', async () => {
+    const [b] = browser([
+      JSON.stringify([{ name: 'cloud', type: 'drive' }]),
+      JSON.stringify([{ ...entry('Shortcut', 0, true), ID: 'target-id\tshortcut-id' }]),
+      args => JSON.stringify([entry(args.includes('target-id') ? filename : 'wrong.txt')])
+    ]);
+    await b.listRemotes();
+    const [folder] = await b.list('cloud', '');
+    expect((await b.list('cloud', folder.folder))[0].playable).toBe(true);
+  });
+  test('rejects forged, cross-remote and refreshed folder references before reading them', async () => {
+    const remotes = JSON.stringify([{ name: 'cloud', type: 'drive' }, { name: 'other', type: 'drive' }]);
+    const [b, spawn] = browser([remotes, JSON.stringify([{ ...entry('Folder', 0, true), ID: 'folder-id' }]), remotes]);
+    await b.listRemotes();
+    const [folder] = await b.list('cloud', '');
+    await expect(b.list('cloud', 'folder-id')).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(b.list('other', folder.folder)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(b.materialize('other', folder.folder)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await b.listRemotes();
+    await expect(b.list('cloud', folder.folder)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(spawn).toHaveBeenCalledTimes(3);
+  });
+  test('does not fall back to a folder name when a Drive directory ID is missing', async () => {
+    const [b] = browser([JSON.stringify([{ name: 'cloud', type: 'drive' }]), JSON.stringify([entry('Folder', 0, true)])]);
+    await b.listRemotes();
+    await expect(b.list('cloud', '')).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+  });
+  test('never guesses between duplicate directories on a path-only provider', async () => {
+    const [b] = browser([localRemote, JSON.stringify([entry('Folder', 0, true), entry('Folder', 0, true)])]);
+    await b.listRemotes();
+    await expect(b.list('cloud', '')).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+    expect(b.folders.size).toBe(0);
   });
   test('missing CLI errors are useful without leaking stderr', async () => {
     const [b] = browser([{ error: 'ENOENT' }]);
     await expect(b.listRemotes()).rejects.toMatchObject({ code: 'NOT_INSTALLED' });
   });
   test('remote errors hide backend details', async () => {
-    const [b] = browser([{ code: 1 }]);
+    const [b] = browser([{ code: 1, stderr: ['secret signed URL'] }]);
     const error = await b.listRemotes().catch(error => error);
     expect(error.code).toBe('REMOTE_ERROR');
     expect(error.message).not.toContain('secret signed URL');
   });
   test.each([
     ['AUTH_REQUIRED', ['invalid_', 'grant: private-secret']],
+    ['AUTH_REQUIRED', ['googleapi: Error 401: private-secret']],
+    ['INVALID_CLIENT', ['invalid_', 'client: private-secret']],
+    ['INVALID_CLIENT', ['redirect_uri_mismatch: private-secret']],
+    ['RATE_LIMIT', ['googleapi: Error 403: private-secret, rateLimit', 'Exceeded']],
+    ['RATE_LIMIT', ['googleapi: Error 429: private-secret']],
     ['NETWORK', ['dial tcp: private-secret']],
     ['PERMISSION', ['insufficient permissions: private-secret']],
     ['CONFIG_LOCKED', ['configuration file is encrypted: private-secret']]
@@ -102,6 +164,13 @@ describe('read-only remote browser', () => {
   test('timeouts stop stalled CLI', async () => {
     const [b] = browser([{ hold: true }], { timeoutMs: 10 });
     await expect(b.listRemotes()).rejects.toMatchObject({ code: 'TIMEOUT' });
+  });
+  test('keeps a known rate-limit cause when the command deadline expires', async () => {
+    const [b] = browser([{ hold: true, stderr: ['googleapi: Error 403: private-secret, rateLimitExceeded'] }], { timeoutMs: 10 });
+    const error = await b.listRemotes().catch(error => error);
+    expect(error.code).toBe('RATE_LIMIT');
+    expect(error.message).not.toContain('private-secret');
+    expect(b.children.size).toBe(0);
   });
   test('IPC rejects unknown senders and subframes before touching the CLI', async () => {
     const handlers = {};
@@ -148,9 +217,9 @@ describe('installed rclone local fixture (no user cloud credentials)', () => {
     });
     try {
       expect(await b.listRemotes()).toEqual(['fixture']);
-      const listing = await b.list('fixture', 'SentryClips');
-      expect(listing[0].isDirectory).toBe(true);
-      const result = await b.materialize('fixture', 'SentryClips/2026-10-09_12-30-00');
+      const [category] = await b.list('fixture', '');
+      const [event] = await b.list('fixture', category.folder);
+      const result = await b.materialize('fixture', event.folder);
       const cacheEvent = path.join(result.directory, 'SentryClips', '2026-10-09_12-30-00');
       expect(fs.readFileSync(path.join(cacheEvent, filename), 'utf8')).toBe('fake-video');
       expect(fs.existsSync(path.join(cacheEvent, 'event.json'))).toBe(true);

@@ -54,7 +54,7 @@ export function initRcloneBrowser(onOpen) {
     status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
     const authAction = make('button', 'btn btn-primary btn-small rclone-auth-action', 'rcloneAuthAction');
     authAction.hidden = true;
-    const details = make('details', 'rclone-error-details'); details.hidden = true;
+    const details = make('details', 'rclone-error-details', 'rcloneErrorDetails'); details.hidden = true;
     const summary = make('summary');
     const errorText = make('p'); details.append(summary, errorText);
     const list = make('div', 'rclone-list', 'rcloneList');
@@ -68,10 +68,11 @@ export function initRcloneBrowser(onOpen) {
     document.body.append(dialog);
     dialog.addEventListener('keydown', event => event.stopPropagation());
     dialog.addEventListener('mousedown', event => event.stopPropagation());
-    let folder = '', busy = false, generation = 0, hasClips = false, opening = false;
-    let statusKey = 'chooseFolder', statusParams = {}, returnFocus = button;
+    let navStack = [], busy = false, generation = 0, hasClips = false, opening = false;
+    let statusKey = 'chooseFolder', statusParams = {}, lastErrorCode = null, returnFocus = button;
+    const currentFolder = () => navStack.length > 0 ? navStack[navStack.length - 1].folder : '';
     function setStatus(key, state = '', params = {}) {
-        statusKey = key; statusParams = params;
+        statusKey = key; statusParams = params; lastErrorCode = null;
         status.textContent = t(`ui.rclone.${key}`, params);
         status.dataset.state = state;
     }
@@ -85,12 +86,16 @@ export function initRcloneBrowser(onOpen) {
         headerClose.setAttribute('aria-label', t('ui.rclone.close'));
         safety.textContent = t('ui.rclone.safety'); summary.textContent = t('ui.rclone.errorDetails');
         authAction.textContent = t('ui.rclone.reconnect') || 'Reconnect';
-        status.textContent = t(`ui.rclone.${statusKey}`, statusParams);
+        if (lastErrorCode === 'RATE_LIMIT') {
+            status.textContent = getRcloneErrorMessage({ code: 'RATE_LIMIT' });
+        } else if (statusKey) {
+            status.textContent = t(`ui.rclone.${statusKey}`, statusParams);
+        }
         for (const row of list.querySelectorAll('[data-folder-name]')) row.setAttribute('aria-label', `${t('ui.rclone.folder')}: ${row.dataset.folderName}`);
     }
     function controls() {
         select.disabled = busy || !select.value; refresh.disabled = busy; manage.disabled = busy;
-        up.disabled = busy || !folder; open.disabled = busy || !hasClips;
+        up.disabled = busy || navStack.length === 0; open.disabled = busy || !hasClips;
         for (const item of list.querySelectorAll('button')) item.disabled = busy;
         button.disabled = busy; close.disabled = headerClose.disabled = opening;
         dialog.setAttribute('aria-busy', String(busy));
@@ -104,12 +109,21 @@ export function initRcloneBrowser(onOpen) {
         try { await fn(() => current === generation && dialog.open); }
         catch (error) {
             if (current === generation && dialog.open) {
-                setStatus('errorTitle', 'error');
-                errorText.textContent = getRcloneErrorMessage(error);
-                details.hidden = !errorText.textContent;
+                lastErrorCode = error?.code || null;
+                if (error?.code === 'RATE_LIMIT') {
+                    statusKey = null;
+                    status.textContent = getRcloneErrorMessage(error);
+                    status.dataset.state = 'error';
+                    details.hidden = true;
+                    authAction.hidden = true;
+                } else {
+                    setStatus('errorTitle', 'error');
+                    errorText.textContent = getRcloneErrorMessage(error);
+                    details.hidden = !errorText.textContent;
 
-                if (error?.code === 'AUTH_REQUIRED') {
-                    authAction.hidden = false;
+                    if (error?.code === 'AUTH_REQUIRED') {
+                        authAction.hidden = false;
+                    }
                 }
             }
         } finally {
@@ -118,22 +132,51 @@ export function initRcloneBrowser(onOpen) {
     }
     async function browse(active) {
         hasClips = false; list.replaceChildren();
-        location.textContent = `${select.value}:${folder || '/'}`; location.title = location.textContent;
-        const entries = await unwrap(api.rcloneList(select.value, folder));
+        const pathNames = navStack.map(s => s.name).join('/');
+        location.textContent = navStack.length ? `${select.value}:/${pathNames}` : `${select.value}:/`;
+        location.title = location.textContent;
+        const entries = await unwrap(api.rcloneList(select.value, currentFolder()));
         if (!active()) return;
         let count = 0;
+
+        const dirCounts = new Map();
+        for (const entry of entries) {
+            if (entry.isDirectory) {
+                dirCounts.set(entry.name, (dirCounts.get(entry.name) || 0) + 1);
+            }
+        }
+
         for (const entry of entries) {
             if (!entry.isDirectory && !entry.playable) continue;
             const row = make(entry.isDirectory ? 'button' : 'div', 'rclone-row');
-            const name = make('span', 'rclone-row-name'); name.textContent = entry.name;
-            row.title = entry.name; row.append(icon(entry.isDirectory ? 'folder' : 'file'), name);
             if (entry.isDirectory) {
-                row.dataset.folderName = entry.name;
-                row.setAttribute('aria-label', `${t('ui.rclone.folder')}: ${entry.name}`);
-                row.onclick = () => { if (busy) return; folder = folder ? `${folder}/${entry.name}` : entry.name; run(browse, 'readingFolder'); };
+                const isDuplicate = (dirCounts.get(entry.name) || 0) > 1;
+                const idSuffix = isDuplicate && entry.id ? (entry.id.length > 6 ? entry.id.slice(-6) : entry.id) : '';
+                const displayName = idSuffix ? `${entry.name} (${idSuffix})` : entry.name;
+
+                const name = make('span', 'rclone-row-name');
+                name.textContent = displayName;
+                row.title = displayName;
+                row.append(icon('folder'), name);
+
+                row.dataset.folderName = displayName;
+                row.setAttribute('aria-label', `${t('ui.rclone.folder')}: ${displayName}`);
+
+                const targetFolder = entry.folder;
+                row.onclick = () => {
+                    if (busy) return;
+                    navStack.push({ folder: targetFolder, name: entry.name });
+                    run(browse, 'readingFolder');
+                };
             } else {
                 count++;
-                const size = make('span', 'rclone-row-size'); size.textContent = `${(entry.size / 1024 ** 2).toFixed(1)} MiB`; row.append(size);
+                const name = make('span', 'rclone-row-name');
+                name.textContent = entry.name;
+                row.title = entry.name;
+                row.append(icon('file'), name);
+                const size = make('span', 'rclone-row-size');
+                size.textContent = `${(entry.size / 1024 ** 2).toFixed(1)} MiB`;
+                row.append(size);
             }
             list.append(row);
         }
@@ -145,23 +188,21 @@ export function initRcloneBrowser(onOpen) {
         const remotes = await unwrap(api.rcloneRemotes());
         if (!active()) return;
         for (const remote of remotes) { const option = make('option'); option.value = option.textContent = remote; select.append(option); }
-        folder = '';
+        navStack.length = 0;
         if (!remotes.length) { setStatus('noRemotes'); return; }
         await browse(active);
     }
-    function onReturnFromSettings(targetRemote, targetFolder) {
+    function onReturnFromSettings(targetRemote) {
         returnFocus = button;
         dialog.showModal();
         run(async active => {
+            navStack.length = 0;
             hasClips = false; list.replaceChildren(); select.replaceChildren(); location.textContent = '';
             const remotes = await unwrap(api.rcloneRemotes());
             if (!active()) return;
             for (const remote of remotes) { const option = make('option'); option.value = option.textContent = remote; select.append(option); }
             if (targetRemote && remotes.includes(targetRemote)) {
                 select.value = targetRemote;
-                folder = targetFolder || '';
-            } else {
-                folder = '';
             }
             if (!remotes.length) { setStatus('noRemotes'); return; }
             await browse(active);
@@ -170,14 +211,12 @@ export function initRcloneBrowser(onOpen) {
     function openSettings(isReconnect = false) {
         if (opening) return;
         const preservedRemote = select.value;
-        const preservedFolder = folder;
         dialog.close();
         openSettingsModal('storage', preservedRemote, {
             reconnect: isReconnect,
             onReturn: (newRemote) => {
                 const finalRemote = newRemote || preservedRemote;
-                const finalFolder = (finalRemote === preservedRemote) ? preservedFolder : '';
-                onReturnFromSettings(finalRemote, finalFolder);
+                onReturnFromSettings(finalRemote);
             }
         });
     }
@@ -186,15 +225,28 @@ export function initRcloneBrowser(onOpen) {
     button.onclick = () => {
         if (dialog.open || busy) return;
         returnFocus = document.activeElement || button;
+        navStack.length = 0;
         dialog.showModal(); run(load, 'findingRemotes');
     };
-    refresh.onclick = () => run(load, 'findingRemotes');
-    select.onchange = () => { if (busy) return; folder = ''; run(browse, 'readingFolder'); };
-    up.onclick = () => { if (busy) return; folder = folder.split('/').slice(0, -1).join('/'); run(browse, 'readingFolder'); };
+    refresh.onclick = () => {
+        if (busy) return;
+        navStack.length = 0;
+        run(load, 'findingRemotes');
+    };
+    select.onchange = () => {
+        if (busy) return;
+        navStack.length = 0;
+        run(browse, 'readingFolder');
+    };
+    up.onclick = () => {
+        if (busy || navStack.length === 0) return;
+        navStack.pop();
+        run(browse, 'readingFolder');
+    };
     open.onclick = () => {
         if (!hasClips || opening) return;
         run(async active => {
-            const result = await unwrap(api.rcloneOpen(select.value, folder));
+            const result = await unwrap(api.rcloneOpen(select.value, currentFolder()));
             if (!active()) return;
             snapshotRoots.add(result.directory.replace(/\\/g, '/'));
             opening = true; controls(); setStatus('preparing', 'loading');
@@ -216,6 +268,7 @@ export function initRcloneBrowser(onOpen) {
     registerRcloneBrowserOpener((remoteName) => {
         if (dialog.open || busy) return;
         returnFocus = button;
+        navStack.length = 0;
         dialog.showModal();
         run(async active => {
             hasClips = false; list.replaceChildren(); select.replaceChildren(); location.textContent = '';
@@ -223,7 +276,6 @@ export function initRcloneBrowser(onOpen) {
             if (!active()) return;
             for (const remote of remotes) { const option = make('option'); option.value = option.textContent = remote; select.append(option); }
             if (remoteName && remotes.includes(remoteName)) select.value = remoteName;
-            folder = '';
             if (!remotes.length) { setStatus('noRemotes'); return; }
             await browse(active);
         }, 'findingRemotes');

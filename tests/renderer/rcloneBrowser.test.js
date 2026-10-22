@@ -82,7 +82,7 @@ function setup() {
   const ids = {
     dialog: 'rcloneDialog', select: 'rcloneRemote', refresh: 'rcloneRefresh', manage: 'rcloneManage',
     up: 'rcloneUp', location: 'rcloneLocation', status: 'rcloneStatus', authAction: 'rcloneAuthAction',
-    list: 'rcloneList', open: 'rcloneDownload', close: 'rcloneClose'
+    list: 'rcloneList', open: 'rcloneDownload', close: 'rcloneClose', details: 'rcloneErrorDetails'
   };
   return { context, document, api, button, openSettingsModal, registerRcloneBrowserOpener, ...Object.fromEntries(Object.entries(ids).map(([name, id]) => [name, document.getElementById(id)])), onOpen };
 }
@@ -107,7 +107,7 @@ test('cancel prevents a late download from replacing current library', async () 
 test('late directory listing after Escape stays dismissed and retry works', async () => {
   const ui = setup(); let resolve; ui.api.rcloneList.mockReturnValueOnce(new Promise(r => { resolve = r; }));
   ui.button.onclick(); await flush(); ui.dialog.listeners.cancel({ preventDefault() {} });
-  resolve({ ok: true, data: [{ name: '<img src=x onerror=bad>', isDirectory: true }] }); await flush();
+  resolve({ ok: true, data: [{ name: '<img src=x onerror=bad>', folder: 'ref-escape', isDirectory: true }] }); await flush();
   expect(ui.list.children).toHaveLength(0); expect(ui.dialog.open).toBe(false);
   ui.button.onclick(); await flush(); expect(ui.dialog.open).toBe(true); expect(ui.open.disabled).toBe(false);
 });
@@ -120,8 +120,9 @@ test('remote and folder names remain literal text and retain their navigation va
   const ui = setup();
   const remote = '<img src=x onerror=bad>';
   const folder = '<script>bad()</script>';
+  const folderRef = 'ref-opaque-folder';
   ui.api.rcloneRemotes.mockResolvedValue({ ok: true, data: [remote] });
-  ui.api.rcloneList.mockResolvedValueOnce({ ok: true, data: [{ name: folder, isDirectory: true }] });
+  ui.api.rcloneList.mockResolvedValueOnce({ ok: true, data: [{ name: folder, folder: folderRef, isDirectory: true }] });
   ui.button.onclick(); await flush();
   expect(ui.select.children[0].textContent).toBe(remote);
   expect(ui.select.children[0].value).toBe(remote);
@@ -129,7 +130,7 @@ test('remote and folder names remain literal text and retain their navigation va
   const text = element => element.textContent + element.children.map(text).join('');
   expect(text(folderButton)).toContain(folder);
   folderButton.onclick(); await flush();
-  expect(ui.api.rcloneList).toHaveBeenLastCalledWith(remote, folder);
+  expect(ui.api.rcloneList).toHaveBeenLastCalledWith(remote, folderRef);
 });
 test('connection management button closes native dialog before opening settings', async () => {
   const ui = setup();
@@ -164,4 +165,116 @@ test('returning from settings selects freshly configured remote and retains navi
   expect(ui.dialog.open).toBe(true);
   expect(ui.select.value).toBe('gdrive-fresh');
   expect(ui.api.rcloneList).toHaveBeenCalledWith('gdrive-fresh', '');
+});
+
+test('navigates folder hierarchy using opaque references and pops on parent', async () => {
+  const ui = setup();
+  ui.api.rcloneRemotes.mockResolvedValue({ ok: true, data: ['drive'] });
+  ui.api.rcloneList.mockResolvedValueOnce({
+    ok: true,
+    data: [{ name: 'TeslaCam', folder: 'ref-fld-123', isDirectory: true }]
+  });
+  ui.button.onclick(); await flush();
+
+  expect(ui.up.disabled).toBe(true);
+  expect(ui.location.textContent).toBe('drive:/');
+
+  const folderBtn = ui.list.querySelectorAll('button')[0];
+  ui.api.rcloneList.mockResolvedValueOnce({
+    ok: true,
+    data: [{ name: '2026-10-10_front.mp4', size: 1024 * 1024 * 2, playable: true }]
+  });
+
+  folderBtn.onclick(); await flush();
+
+  expect(ui.api.rcloneList).toHaveBeenLastCalledWith('drive', 'ref-fld-123');
+  expect(ui.up.disabled).toBe(false);
+  expect(ui.location.textContent).toBe('drive:/TeslaCam');
+
+  ui.api.rcloneList.mockResolvedValueOnce({
+    ok: true,
+    data: [{ name: 'TeslaCam', folder: 'ref-fld-123', isDirectory: true }]
+  });
+  ui.up.onclick(); await flush();
+
+  expect(ui.api.rcloneList).toHaveBeenLastCalledWith('drive', '');
+  expect(ui.up.disabled).toBe(true);
+  expect(ui.location.textContent).toBe('drive:/');
+});
+
+test('distinguishes same-name directory rows using entry.id suffix in label and navigates with opaque ref', async () => {
+  const ui = setup();
+  ui.api.rcloneRemotes.mockResolvedValue({ ok: true, data: ['fixture'] });
+  ui.api.rcloneList.mockResolvedValueOnce({
+    ok: true,
+    data: [
+      { name: 'TeslaCam', folder: 'ref-fld-1', id: '111111222222', isDirectory: true },
+      { name: 'TeslaCam', folder: 'ref-fld-2', id: '333333444444', isDirectory: true }
+    ]
+  });
+  ui.button.onclick(); await flush();
+
+  const buttons = ui.list.querySelectorAll('button');
+  expect(buttons.length).toBe(2);
+
+  const text = el => el.textContent + el.children.map(text).join('');
+  expect(text(buttons[0])).toContain('222222');
+  expect(text(buttons[1])).toContain('444444');
+  expect(buttons[0].attributes['aria-label']).toContain('222222');
+  expect(buttons[1].attributes['aria-label']).toContain('444444');
+
+  ui.api.rcloneList.mockResolvedValueOnce({
+    ok: true,
+    data: [{ name: 'clip.mp4', size: 1000, playable: true }]
+  });
+  buttons[1].onclick(); await flush();
+
+  expect(ui.api.rcloneList).toHaveBeenLastCalledWith('fixture', 'ref-fld-2');
+  expect(ui.location.textContent).toBe('fixture:/TeslaCam');
+  expect(ui.location.textContent).not.toContain('ref-fld-2');
+});
+
+test('rate limit error shows directly in picker status without reconnect CTA or details', async () => {
+  const ui = setup();
+  ui.api.rcloneRemotes.mockResolvedValue({ ok: true, data: ['fixture'] });
+  ui.api.rcloneList.mockResolvedValueOnce({
+    ok: false,
+    error: { code: 'RATE_LIMIT', message: 'Rate limit exceeded' }
+  });
+
+  ui.button.onclick(); await flush();
+
+  expect(ui.status.dataset.state).toBe('error');
+  expect(ui.status.textContent).not.toBe('');
+  expect(ui.authAction.hidden).toBe(true);
+  expect(ui.details.hidden).toBe(true);
+});
+
+test('remote change resets root navigation', async () => {
+  const ui = setup();
+  ui.api.rcloneRemotes.mockResolvedValue({ ok: true, data: ['drive-a', 'drive-b'] });
+  ui.api.rcloneList.mockResolvedValueOnce({
+    ok: true,
+    data: [{ name: 'Sub', folder: 'ref-sub', isDirectory: true }]
+  });
+  ui.button.onclick(); await flush();
+
+  ui.api.rcloneList.mockResolvedValueOnce({
+    ok: true,
+    data: [{ name: 'clip.mp4', size: 1000, playable: true }]
+  });
+  const subBtn = ui.list.querySelectorAll('button')[0];
+  subBtn.onclick(); await flush();
+  expect(ui.up.disabled).toBe(false);
+
+  ui.select.value = 'drive-b';
+  ui.api.rcloneList.mockResolvedValueOnce({
+    ok: true,
+    data: []
+  });
+  ui.select.onchange();
+  await flush();
+
+  expect(ui.api.rcloneList).toHaveBeenLastCalledWith('drive-b', '');
+  expect(ui.up.disabled).toBe(true);
 });

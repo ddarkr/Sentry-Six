@@ -5,6 +5,8 @@ const { randomBytes } = require('crypto');
 const MESSAGES = {
   INVALID_INPUT: 'Invalid cloud connection request.', BUSY: 'A cloud operation is already running.',
   CANCELLED: 'Cloud configuration cancelled.', TIMEOUT: 'Cloud configuration timed out.',
+  RATE_LIMIT: 'The storage service is limiting requests. Wait and try again; signing in again is not required.',
+  INVALID_CLIENT: 'Check the Client ID and Client secret for your Google Cloud Desktop app.',
   CONFIG_LOCKED: 'This configuration cannot be safely edited. Use rclone to manage it.',
   CONFIG_CONFLICT: 'The configuration changed. Start again.', UNSUPPORTED: 'This configuration step is not supported.',
   PERMISSION: 'Configuration access was denied.', REMOTE_ERROR: 'The cloud operation failed.',
@@ -59,7 +61,7 @@ class RcloneConfig {
     });
   }
   async probe(name, options) {
-    const result = json(await this.text(['lsjson', '--max-depth', '1', '--dirs-only', '--', `${name}:`], { ...options, timeoutMs: 30000 }));
+    const result = json(await this.text(['lsjson', '--low-level-retries', '5', '--max-depth', '1', '--dirs-only', '--', `${name}:`], { ...options, timeoutMs: 120000 }));
     if (!Array.isArray(result)) throw failure('REMOTE_ERROR');
   }
   check(name) {
@@ -76,8 +78,17 @@ class RcloneConfig {
     if (this.closed) return Promise.reject(failure('CANCELLED'));
     if (this.active || this.browser.busy) return Promise.reject(failure('BUSY'));
     if (!request || !['create', 'reconnect', 'remove'].includes(request.mode) || !validName(request.name)) return Promise.reject(failure('INVALID_INPUT'));
+    let oauth = request.oauth;
+    if (request.mode === 'remove' && oauth !== undefined) return Promise.reject(failure('INVALID_INPUT'));
+    if (request.mode === 'create' || oauth !== undefined) {
+      if (!oauth || typeof oauth.clientId !== 'string' || typeof oauth.clientSecret !== 'string') return Promise.reject(failure('INVALID_CLIENT'));
+      oauth = { clientId: oauth.clientId.trim(), clientSecret: oauth.clientSecret.trim() };
+      if (oauth.clientId.length > 255 || !/^[A-Za-z0-9._-]+\.apps\.googleusercontent\.com$/.test(oauth.clientId) ||
+          !/^[A-Za-z0-9_-]{1,512}$/.test(oauth.clientSecret)) return Promise.reject(failure('INVALID_CLIENT'));
+    }
     // Reserve before any asynchronous work, so cancellation also covers filesystem preparation.
     const session = { id: randomBytes(24).toString('hex'), name: request.name, mode: request.mode, cancelled: false };
+    request = null;
     this.active = session;
     session.timer = setTimeout(() => { session.timedOut = true; this.cancel().catch(() => {}); }, 600000);
     session.timer.unref?.();
@@ -116,23 +127,35 @@ class RcloneConfig {
         await this.cleanup(session);
         return { sessionId: session.id, remote: session.name, done: true };
       }
-      const args = session.mode === 'create'
-        ? ['config', 'create', session.name, 'drive', 'scope', 'drive.readonly', '--non-interactive']
-        : ['config', 'update', session.name, '--non-interactive'];
-      return this.advance(session, args);
+      if (session.mode === 'create' || oauth) {
+        // rclone merges repeated INI sections and normalizes them on update.
+        // Validated single-line values stay in the private draft, never argv or env.
+        let fragment = `\n[${session.name}]\n`;
+        if (session.mode === 'create') fragment += 'type = drive\nscope = drive.readonly\n';
+        if (oauth) fragment += `client_id = ${oauth.clientId}\nclient_secret = ${oauth.clientSecret}\ntoken =\nservice_account_file =\nservice_account_credentials =\nenv_auth = false\n`;
+        fs.appendFileSync(session.staged, fragment);
+        fragment = null;
+      }
+      oauth = null;
+      return this.advance(session, ['config', 'update', session.name, '--non-interactive']);
     });
   }
   continue(request) {
     const session = this.active;
     if (!session || !request || request.sessionId !== session.id || typeof request.value !== 'string' || !session.question || !session.question.choices.some(choice => choice.value === request.value)) return Promise.reject(failure('INVALID_INPUT'));
-    return this.run(() => { this.assertActive(session); session.question = null; return this.advance(session, this.answerArgs(session, request.value)); });
+    return this.run(() => {
+      this.assertActive(session); session.question = null;
+      session.options.timeoutMs = 120000;
+      return this.advance(session, this.answerArgs(session, request.value));
+    });
   }
   answerArgs(session, value) { return ['config', 'update', session.name, '--non-interactive', '--continue', '--state', session.state, '--result', value]; }
   async advance(session, args) {
     for (let count = 0; count < 20; count++) {
       this.assertActive(session);
       const output = json(await this.text(args, session.options)); this.assertActive(session);
-      if (output.Error || typeof output.State !== 'string') throw failure('AUTH_REQUIRED');
+      if (output.Error) throw failure(/invalid_client|unauthorized_client|deleted_client|redirect_uri_mismatch/i.test(output.Error) ? 'INVALID_CLIENT' : 'AUTH_REQUIRED');
+      if (typeof output.State !== 'string') throw failure('AUTH_REQUIRED');
       if (!output.State) {
         const remotes = await this.metadata(session.options); this.assertActive(session);
         if (!remotes.some(remote => remote.name === session.name && remote.type === 'drive' && remote.source === 'file')) throw failure('UNSUPPORTED');
@@ -179,6 +202,7 @@ class RcloneConfig {
       if (latest.revision !== current.revision || !latest.bytes.equals(current.bytes)) throw failure('CONFIG_CONFLICT');
       this.assertActive(session);
       fs.renameSync(candidate, session.filename);
+      this.browser.folders.clear();
     } finally { if (directory) fs.rmSync(directory, { recursive: true, force: true }); }
   }
   async cleanup(session) {

@@ -3672,7 +3672,8 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .input-row .text-input,
-.settings-modal .rclone-add-form .text-input {
+.settings-modal .rclone-add-form .text-input,
+.settings-modal .rclone-oauth-editor .text-input {
     flex: 1;
     padding: 8px 12px;
     background: var(--input-bg);
@@ -3684,13 +3685,15 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .input-row .text-input:focus,
-.settings-modal .rclone-add-form .text-input:focus {
+.settings-modal .rclone-add-form .text-input:focus,
+.settings-modal .rclone-oauth-editor .text-input:focus {
     outline: none;
     border-color: var(--accent-color);
 }
 
 .input-row .text-input::placeholder,
-.settings-modal .rclone-add-form .text-input::placeholder {
+.settings-modal .rclone-add-form .text-input::placeholder,
+.settings-modal .rclone-oauth-editor .text-input::placeholder {
     color: var(--text-faint);
 }
 
@@ -6963,6 +6966,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 /* Input rows with focus glow */
 .settings-modal .input-row .text-input:focus,
 .settings-modal .rclone-add-form .text-input:focus,
+.settings-modal .rclone-oauth-editor .text-input:focus,
 .dev-modal .input-row .text-input:focus {
     border-color: var(--settings-accent);
     box-shadow: 0 0 0 3px var(--settings-accent-soft);
@@ -8265,10 +8269,20 @@ button.rclone-row:active, .rclone-dialog .btn:active { background: var(--surface
     flex-wrap: wrap;
 }
 
+.rclone-add-form input,
+.rclone-oauth-editor input.text-input {
+    height: 32px;
+    box-sizing: border-box;
+}
+
 .rclone-add-form input {
     flex: 1;
     min-width: 140px;
-    height: 32px;
+}
+
+.rclone-oauth-editor input.text-input {
+    width: 100%;
+    min-width: 0;
 }
 
 .rclone-form-feedback {
@@ -8517,7 +8531,8 @@ button.rclone-row:active, .rclone-dialog .btn:active { background: var(--surface
         width: 100%;
     }
 
-    .settings-modal .rclone-add-form input {
+    .settings-modal .rclone-add-form input,
+    .settings-modal .rclone-oauth-editor input.text-input {
         width: 100%;
         min-width: 0;
         box-sizing: border-box;

@@ -18,6 +18,9 @@ let inFlightStatusPromise = null;
 
 // Draft and auth persistence across re-renders
 let draftRemoteName = 'gdrive';
+let draftClientId = '';
+let editingOAuthRemote = null;
+let activeConfigTarget = null;
 let activeAuthState = null;
 let activeFeedback = null;
 let confirmingRemoveRemote = null;
@@ -25,6 +28,86 @@ let focusTargetRemoteOnRender = null;
 
 // Remote connection states: remoteName -> { state: 'unchecked' | 'checking' | 'connected' | 'auth-required' | 'error', errorMsg?: string }
 const remoteStates = new Map();
+
+const CLIENT_ID_REGEX = /^[A-Za-z0-9._-]+[.]apps[.]googleusercontent[.]com$/;
+const CLIENT_SECRET_REGEX = /^[A-Za-z0-9_-]{1,512}$/;
+
+export function validateOAuthCredentials(clientId, clientSecret) {
+    const cid = (clientId || '').trim();
+    const sec = (clientSecret || '').trim();
+    if (!cid) {
+        return { valid: false, errorKey: 'clientIdRequired' };
+    }
+    if (cid.length > 255 || !CLIENT_ID_REGEX.test(cid)) {
+        return { valid: false, errorKey: 'invalidClientId' };
+    }
+    if (!sec) {
+        return { valid: false, errorKey: 'clientSecretRequired' };
+    }
+    if (sec.length > 512 || !CLIENT_SECRET_REGEX.test(sec)) {
+        return { valid: false, errorKey: 'invalidClientSecret' };
+    }
+    return { valid: true, clientId: cid, clientSecret: sec };
+}
+
+function clearOAuthInputs() {
+    draftClientId = '';
+    if (!containerEl) return;
+    const inputs = containerEl.querySelectorAll('.rclone-secret-input, .rclone-oauth-client-id-input, #rcloneDriveClientIdInput');
+    for (const input of inputs) {
+        input.value = '';
+    }
+}
+
+function createOAuthHelpSection() {
+    const helpContainer = document.createElement('div');
+    helpContainer.className = 'rclone-card-desc';
+    helpContainer.style.display = 'flex';
+    helpContainer.style.flexDirection = 'column';
+    helpContainer.style.gap = '6px';
+    helpContainer.style.margin = '2px 0 6px';
+
+    const notice = document.createElement('div');
+    notice.style.lineHeight = '1.4';
+    notice.textContent = t('ui.rclone.oauthHelpNotice');
+    helpContainer.append(notice);
+
+    const links = document.createElement('div');
+    links.style.display = 'flex';
+    links.style.alignItems = 'center';
+    links.style.gap = '12px';
+    links.style.flexWrap = 'wrap';
+
+    const consoleLink = document.createElement('a');
+    consoleLink.className = 'rclone-install-link';
+    consoleLink.href = 'https://console.cloud.google.com/apis/credentials';
+    consoleLink.target = '_blank';
+    consoleLink.rel = 'noopener noreferrer';
+    consoleLink.textContent = t('ui.rclone.oauthConsoleLink');
+    consoleLink.onclick = (e) => {
+        e.preventDefault();
+        if (window.electronAPI?.openExternal) {
+            window.electronAPI.openExternal('https://console.cloud.google.com/apis/credentials');
+        }
+    };
+
+    const guideLink = document.createElement('a');
+    guideLink.className = 'rclone-install-link';
+    guideLink.href = 'https://rclone.org/drive/#making-your-own-client-id';
+    guideLink.target = '_blank';
+    guideLink.rel = 'noopener noreferrer';
+    guideLink.textContent = t('ui.rclone.oauthGuideLink');
+    guideLink.onclick = (e) => {
+        e.preventDefault();
+        if (window.electronAPI?.openExternal) {
+            window.electronAPI.openExternal('https://rclone.org/drive/#making-your-own-client-id');
+        }
+    };
+
+    links.append(consoleLink, guideLink);
+    helpContainer.append(links);
+    return helpContainer;
+}
 
 /**
  * Unwrap the { ok: true, data } / { ok: false, error } API envelope.
@@ -93,6 +176,8 @@ export async function cancelConfigSession() {
         } finally {
             configSessionActive = false;
             activeAuthState = null;
+            activeConfigTarget = null;
+            clearOAuthInputs();
             pendingCancelPromise = null;
             render();
             enableFormControls(true);
@@ -110,6 +195,8 @@ export async function onCloseRcloneSettings() {
     isSettingsOpen = false;
     confirmingRemoveRemote = null;
     focusTargetRemoteOnRender = null;
+    editingOAuthRemote = null;
+    clearOAuthInputs();
     lifecycleGeneration++;
 
     const cancelAuth = cancelConfigSession();
@@ -149,6 +236,8 @@ export async function onOpenRcloneSettings(selectedRemote = null, options = {}) 
     if (isNewVisit) {
         confirmingRemoveRemote = null;
         focusTargetRemoteOnRender = null;
+        editingOAuthRemote = null;
+        clearOAuthInputs();
         resetConfiguredRemoteForVisit();
         ++lifecycleGeneration;
     }
@@ -480,6 +569,22 @@ function createRemoteCard(remote) {
             startConfigure({ mode: 'reconnect', name: remote.name });
         };
         actions.append(reconnectBtn);
+
+        if (remote.type === 'drive' && remote.source !== 'environment') {
+            const oauthBtn = document.createElement('button');
+            oauthBtn.className = 'btn btn-secondary btn-small rclone-oauth-btn';
+            oauthBtn.dataset.action = 'oauth';
+            oauthBtn.type = 'button';
+            oauthBtn.textContent = t('ui.rclone.personalOAuth');
+            oauthBtn.disabled = actionsDisabled;
+            oauthBtn.onclick = () => {
+                if (isAnyActionBusy()) return;
+                editingOAuthRemote = editingOAuthRemote === remote.name ? null : remote.name;
+                clearOAuthInputs();
+                render();
+            };
+            actions.append(oauthBtn);
+        }
     }
 
     const openBtn = document.createElement('button');
@@ -515,6 +620,116 @@ function createRemoteCard(remote) {
     actions.append(removeBtn);
 
     card.append(actions);
+
+    if (editingOAuthRemote === remote.name) {
+        const oauthEditor = document.createElement('div');
+        oauthEditor.className = 'rclone-question-container rclone-oauth-editor';
+        oauthEditor.style.marginTop = '8px';
+
+        const editorTitle = document.createElement('div');
+        editorTitle.className = 'rclone-card-title';
+        editorTitle.textContent = t('ui.rclone.personalOAuthSettings');
+
+        const helpSection = createOAuthHelpSection();
+
+        const clientIdField = document.createElement('div');
+        clientIdField.style.display = 'flex';
+        clientIdField.style.flexDirection = 'column';
+        clientIdField.style.gap = '4px';
+        clientIdField.style.width = '100%';
+        const clientIdLabel = document.createElement('label');
+        clientIdLabel.className = 'rclone-question-label';
+        clientIdLabel.htmlFor = `rcloneOAuthClientId_${remote.name}`;
+        clientIdLabel.textContent = t('ui.rclone.clientIdLabel');
+        const clientIdInput = document.createElement('input');
+        clientIdInput.type = 'text';
+        clientIdInput.id = `rcloneOAuthClientId_${remote.name}`;
+        clientIdInput.className = 'text-input rclone-oauth-client-id-input';
+        clientIdInput.placeholder = t('ui.rclone.clientIdPlaceholder');
+        clientIdInput.autocomplete = 'off';
+        clientIdInput.spellcheck = false;
+        clientIdInput.disabled = actionsDisabled;
+        clientIdField.append(clientIdLabel, clientIdInput);
+
+        const clientSecretField = document.createElement('div');
+        clientSecretField.style.display = 'flex';
+        clientSecretField.style.flexDirection = 'column';
+        clientSecretField.style.gap = '4px';
+        clientSecretField.style.width = '100%';
+        const clientSecretLabel = document.createElement('label');
+        clientSecretLabel.className = 'rclone-question-label';
+        clientSecretLabel.htmlFor = `rcloneOAuthClientSecret_${remote.name}`;
+        clientSecretLabel.textContent = t('ui.rclone.clientSecretLabel');
+        const clientSecretInput = document.createElement('input');
+        clientSecretInput.type = 'password';
+        clientSecretInput.setAttribute('type', 'password');
+        clientSecretInput.id = `rcloneOAuthClientSecret_${remote.name}`;
+        clientSecretInput.className = 'text-input rclone-secret-input rclone-oauth-client-secret-input';
+        clientSecretInput.placeholder = t('ui.rclone.clientSecretPlaceholder');
+        clientSecretInput.autocomplete = 'off';
+        clientSecretInput.spellcheck = false;
+        clientSecretInput.value = '';
+        clientSecretInput.disabled = actionsDisabled;
+        clientSecretField.append(clientSecretLabel, clientSecretInput);
+
+        const inlineFeedback = document.createElement('div');
+        inlineFeedback.className = 'rclone-form-feedback hidden';
+
+        const editorActions = document.createElement('div');
+        editorActions.className = 'rclone-remote-actions';
+        editorActions.style.justifyContent = 'flex-end';
+        editorActions.style.marginTop = '4px';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'btn btn-secondary btn-small rclone-oauth-cancel-btn';
+        cancelBtn.type = 'button';
+        cancelBtn.textContent = t('ui.rclone.cancel');
+        cancelBtn.disabled = actionsDisabled;
+        cancelBtn.onclick = () => {
+            clientIdInput.value = '';
+            clientSecretInput.value = '';
+            clearOAuthInputs();
+            editingOAuthRemote = null;
+            render();
+        };
+
+        const applyBtn = document.createElement('button');
+        applyBtn.className = 'btn btn-primary btn-small rclone-oauth-apply-btn';
+        applyBtn.type = 'button';
+        applyBtn.textContent = t('ui.rclone.applyAndSignIn');
+        applyBtn.disabled = actionsDisabled;
+        applyBtn.onclick = () => {
+            if (isAnyActionBusy() || !isInstalled) return;
+            const validation = validateOAuthCredentials(clientIdInput.value, clientSecretInput.value);
+            if (!validation.valid) {
+                inlineFeedback.textContent = t(`ui.rclone.${validation.errorKey}`);
+                inlineFeedback.className = 'rclone-form-feedback error';
+                return;
+            }
+
+            clientIdInput.value = '';
+            clientSecretInput.value = '';
+            clearOAuthInputs();
+            editingOAuthRemote = null;
+
+            startConfigure({
+                mode: 'reconnect',
+                name: remote.name,
+                oauth: { clientId: validation.clientId, clientSecret: validation.clientSecret }
+            });
+        };
+
+        editorActions.append(cancelBtn, applyBtn);
+        oauthEditor.append(editorTitle, helpSection, clientIdField, clientSecretField, inlineFeedback, editorActions);
+        card.append(oauthEditor);
+    }
+
+    if (activeConfigTarget === remote.name) {
+        const authPanel = document.createElement('div');
+        authPanel.className = 'rclone-auth-panel';
+        authPanel.id = 'rcloneAuthPanel';
+        card.append(authPanel);
+    }
 
     if (confirmingRemoveRemote === remote.name) {
         const confirmBox = document.createElement('div');
@@ -627,9 +842,25 @@ function renderAddDriveCard() {
     desc.className = 'rclone-card-desc';
     desc.textContent = t('ui.rclone.addGoogleDriveDesc');
 
+    const helpSection = createOAuthHelpSection();
+
     const form = document.createElement('div');
     form.className = 'rclone-add-form';
+    form.style.display = 'flex';
+    form.style.flexDirection = 'column';
+    form.style.gap = '8px';
+    form.style.width = '100%';
 
+    // Remote name field
+    const nameField = document.createElement('div');
+    nameField.style.display = 'flex';
+    nameField.style.flexDirection = 'column';
+    nameField.style.gap = '4px';
+    nameField.style.width = '100%';
+    const nameLabel = document.createElement('label');
+    nameLabel.className = 'rclone-question-label';
+    nameLabel.htmlFor = 'rcloneDriveNameInput';
+    nameLabel.textContent = t('ui.rclone.remoteLabel');
     const input = document.createElement('input');
     input.type = 'text';
     input.className = 'text-input';
@@ -641,6 +872,55 @@ function renderAddDriveCard() {
     input.oninput = () => {
         draftRemoteName = input.value;
     };
+    nameField.append(nameLabel, input);
+
+    // Client ID field
+    const clientIdField = document.createElement('div');
+    clientIdField.style.display = 'flex';
+    clientIdField.style.flexDirection = 'column';
+    clientIdField.style.gap = '4px';
+    clientIdField.style.width = '100%';
+    const clientIdLabel = document.createElement('label');
+    clientIdLabel.className = 'rclone-question-label';
+    clientIdLabel.htmlFor = 'rcloneDriveClientIdInput';
+    clientIdLabel.textContent = t('ui.rclone.clientIdLabel');
+    const clientIdInput = document.createElement('input');
+    clientIdInput.type = 'text';
+    clientIdInput.className = 'text-input';
+    clientIdInput.id = 'rcloneDriveClientIdInput';
+    clientIdInput.placeholder = t('ui.rclone.clientIdPlaceholder');
+    clientIdInput.setAttribute('aria-label', t('ui.rclone.clientIdLabel'));
+    clientIdInput.autocomplete = 'off';
+    clientIdInput.spellcheck = false;
+    clientIdInput.value = draftClientId;
+    clientIdInput.disabled = isAnyActionBusy();
+    clientIdInput.oninput = () => {
+        draftClientId = clientIdInput.value;
+    };
+    clientIdField.append(clientIdLabel, clientIdInput);
+
+    // Client Secret field
+    const clientSecretField = document.createElement('div');
+    clientSecretField.style.display = 'flex';
+    clientSecretField.style.flexDirection = 'column';
+    clientSecretField.style.gap = '4px';
+    clientSecretField.style.width = '100%';
+    const clientSecretLabel = document.createElement('label');
+    clientSecretLabel.className = 'rclone-question-label';
+    clientSecretLabel.htmlFor = 'rcloneDriveClientSecretInput';
+    clientSecretLabel.textContent = t('ui.rclone.clientSecretLabel');
+    const clientSecretInput = document.createElement('input');
+    clientSecretInput.type = 'password';
+    clientSecretInput.setAttribute('type', 'password');
+    clientSecretInput.className = 'text-input rclone-secret-input';
+    clientSecretInput.id = 'rcloneDriveClientSecretInput';
+    clientSecretInput.placeholder = t('ui.rclone.clientSecretPlaceholder');
+    clientSecretInput.setAttribute('aria-label', t('ui.rclone.clientSecretLabel'));
+    clientSecretInput.autocomplete = 'off';
+    clientSecretInput.spellcheck = false;
+    clientSecretInput.value = '';
+    clientSecretInput.disabled = isAnyActionBusy();
+    clientSecretField.append(clientSecretLabel, clientSecretInput);
 
     const isInstalled = cachedStatus?.installed === true;
     const btn = document.createElement('button');
@@ -650,15 +930,20 @@ function renderAddDriveCard() {
     btn.textContent = t('ui.rclone.signInWithBrowser');
     btn.disabled = isAnyActionBusy() || !isInstalled;
 
-    form.append(input, btn);
+    form.append(nameField, clientIdField, clientSecretField, btn);
 
     const feedback = document.createElement('div');
     feedback.className = 'rclone-form-feedback hidden';
     feedback.id = 'rcloneFormFeedback';
 
-    const authPanel = document.createElement('div');
-    authPanel.className = 'rclone-auth-panel hidden';
-    authPanel.id = 'rcloneAuthPanel';
+    card.append(title, desc, helpSection, form, feedback);
+
+    if (!activeConfigTarget) {
+        const authPanel = document.createElement('div');
+        authPanel.className = 'rclone-auth-panel hidden';
+        authPanel.id = 'rcloneAuthPanel';
+        card.append(authPanel);
+    }
 
     btn.onclick = () => {
         if (isAnyActionBusy() || !isInstalled) return;
@@ -671,11 +956,24 @@ function renderAddDriveCard() {
             showFeedback(t('ui.rclone.invalidRemoteName'), 'error');
             return;
         }
+        const validation = validateOAuthCredentials(clientIdInput.value, clientSecretInput.value);
+        if (!validation.valid) {
+            showFeedback(t(`ui.rclone.${validation.errorKey}`), 'error');
+            return;
+        }
+
+        clientIdInput.value = '';
+        clientSecretInput.value = '';
+        clearOAuthInputs();
+
         showFeedback(null);
-        startConfigure({ mode: 'create', name: nameVal });
+        startConfigure({
+            mode: 'create',
+            name: nameVal,
+            oauth: { clientId: validation.clientId, clientSecret: validation.clientSecret }
+        });
     };
 
-    card.append(title, desc, form, feedback, authPanel);
     containerEl.append(card);
 
     // Restore active feedback if any
@@ -684,7 +982,7 @@ function renderAddDriveCard() {
     }
 
     // Restore active auth panel if any
-    if (activeAuthState) {
+    if (activeAuthState && !activeConfigTarget) {
         renderAuthPanel(activeAuthState);
     }
 }
@@ -704,8 +1002,12 @@ function showFeedback(text, type = 'error') {
 
 function enableFormControls(enabled) {
     const input = document.getElementById('rcloneDriveNameInput');
+    const clientIdInput = document.getElementById('rcloneDriveClientIdInput');
+    const clientSecretInput = document.getElementById('rcloneDriveClientSecretInput');
     const btn = document.getElementById('rcloneDriveSubmitBtn');
     if (input) input.disabled = !enabled;
+    if (clientIdInput) clientIdInput.disabled = !enabled;
+    if (clientSecretInput) clientSecretInput.disabled = !enabled;
     if (btn) btn.disabled = !enabled;
 }
 
@@ -720,12 +1022,13 @@ function getPromptLabel(question) {
     return question.label || question.name || '';
 }
 
-async function startConfigure({ mode, name }) {
+async function startConfigure({ mode, name, oauth }) {
     if (isAnyActionBusy()) return;
     const isInstalled = cachedStatus?.installed === true;
     if (!isInstalled) return;
 
     configSessionActive = true;
+    activeConfigTarget = mode === 'create' ? null : name;
     const currentGen = ++configGeneration;
 
     render(); // Update UI to disable buttons while auth session starts
@@ -749,9 +1052,14 @@ async function startConfigure({ mode, name }) {
     }
 
     try {
-        const res = await unwrapRcloneResponse(
-            window.electronAPI.rcloneConfigure({ mode, name })
-        );
+        let req = oauth
+            ? { mode, name, oauth: { clientId: oauth.clientId, clientSecret: oauth.clientSecret } }
+            : { mode, name };
+        oauth = null;
+        const configurePromise = window.electronAPI.rcloneConfigure(req);
+        req = null;
+
+        const res = await unwrapRcloneResponse(configurePromise);
 
         if (currentGen !== configGeneration || !isSettingsOpen) return;
         await handleConfigResult(res, currentGen, mode);
@@ -759,9 +1067,20 @@ async function startConfigure({ mode, name }) {
         if (currentGen !== configGeneration || !isSettingsOpen) return;
         configSessionActive = false;
         activeAuthState = null;
+        clearOAuthInputs();
         renderAuthPanel(null);
         enableFormControls(true);
-        showFeedback(getRcloneErrorMessage(err), 'error');
+        const errMessage = getRcloneErrorMessage(err);
+        if (activeConfigTarget) {
+            remoteStates.set(activeConfigTarget, {
+                ...remoteStates.get(activeConfigTarget),
+                state: 'error',
+                errorMsg: errMessage
+            });
+        } else {
+            showFeedback(errMessage, 'error');
+        }
+        activeConfigTarget = null;
         render(); // Re-enable controls
     }
 }
@@ -772,6 +1091,8 @@ async function handleConfigResult(result, currentGen, mode) {
     if (!result) {
         configSessionActive = false;
         activeAuthState = null;
+        activeConfigTarget = null;
+        clearOAuthInputs();
         renderAuthPanel(null);
         enableFormControls(true);
         render();
@@ -781,6 +1102,7 @@ async function handleConfigResult(result, currentGen, mode) {
     if (result.done) {
         configSessionActive = false;
         activeAuthState = null;
+        clearOAuthInputs();
         renderAuthPanel(null);
         enableFormControls(true);
 
@@ -793,11 +1115,15 @@ async function handleConfigResult(result, currentGen, mode) {
                 confirmingRemoveRemote = null;
             }
             showFeedback(t('ui.rclone.removeSuccess', { remote: result.remote }), 'success');
+        } else if (mode === 'reconnect') {
+            remoteStates.set(result.remote, { state: 'connected' });
+            showFeedback(t('ui.rclone.configSuccess', { remote: result.remote }), 'success');
         } else {
             newConfiguredRemoteThisVisit = result.remote;
             remoteStates.set(result.remote, { state: 'connected' });
             showFeedback(t('ui.rclone.configSuccess', { remote: result.remote }), 'success');
         }
+        activeConfigTarget = null;
 
         await loadStatus();
         return;
@@ -829,14 +1155,25 @@ async function handleConfigResult(result, currentGen, mode) {
                         })
                     );
                     if (currentGen !== configGeneration || !isSettingsOpen) return;
-                    await handleConfigResult(nextRes, currentGen);
+                    await handleConfigResult(nextRes, currentGen, mode);
                 } catch (err) {
                     if (currentGen !== configGeneration || !isSettingsOpen) return;
                     configSessionActive = false;
                     activeAuthState = null;
+                    clearOAuthInputs();
                     renderAuthPanel(null);
                     enableFormControls(true);
-                    showFeedback(getRcloneErrorMessage(err), 'error');
+                    const errMessage = getRcloneErrorMessage(err);
+                    if (activeConfigTarget) {
+                        remoteStates.set(activeConfigTarget, {
+                            ...remoteStates.get(activeConfigTarget),
+                            state: 'error',
+                            errorMsg: errMessage
+                        });
+                    } else {
+                        showFeedback(errMessage, 'error');
+                    }
+                    activeConfigTarget = null;
                     render();
                 }
             }

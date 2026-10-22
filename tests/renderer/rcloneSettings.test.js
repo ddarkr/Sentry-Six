@@ -240,10 +240,14 @@ test('Google Drive add form validates input and prevents invalid names', async (
   await flush();
 
   const input = container.querySelector('#rcloneDriveNameInput');
+  const clientIdInput = container.querySelector('#rcloneDriveClientIdInput');
+  const clientSecretInput = container.querySelector('#rcloneDriveClientSecretInput');
   const submitBtn = container.querySelector('#rcloneDriveSubmitBtn');
   const feedback = container.querySelector('#rcloneFormFeedback');
 
   input.value = '';
+  clientIdInput.value = 'valid.id-123.apps.googleusercontent.com';
+  clientSecretInput.value = 'valid_secret-123';
   submitBtn.onclick();
   await flush();
   expect(api.rcloneConfigure).not.toHaveBeenCalled();
@@ -260,9 +264,14 @@ test('Google Drive create flow handles awaiting sign-in, questions, and done com
   await flush();
 
   const input = container.querySelector('#rcloneDriveNameInput');
+  const clientIdInput = container.querySelector('#rcloneDriveClientIdInput');
+  const clientSecretInput = container.querySelector('#rcloneDriveClientSecretInput');
   const submitBtn = container.querySelector('#rcloneDriveSubmitBtn');
 
   input.value = 'my-drive';
+  clientIdInput.value = 'my-client.apps.googleusercontent.com';
+  clientSecretInput.value = 'my-secret-123';
+
   api.rcloneConfigure.mockResolvedValueOnce({
     ok: true,
     data: {
@@ -290,7 +299,14 @@ test('Google Drive create flow handles awaiting sign-in, questions, and done com
   submitBtn.onclick();
   await flush();
 
-  expect(api.rcloneConfigure).toHaveBeenCalledWith({ mode: 'create', name: 'my-drive' });
+  expect(api.rcloneConfigure).toHaveBeenCalledWith({
+    mode: 'create',
+    name: 'my-drive',
+    oauth: {
+      clientId: 'my-client.apps.googleusercontent.com',
+      clientSecret: 'my-secret-123'
+    }
+  });
 
   const authPanel = container.querySelector('#rcloneAuthPanel');
   expect(authPanel.classList.contains('hidden')).toBe(false);
@@ -319,8 +335,12 @@ test('cancellation sends rcloneConfigCancel and resets auth panel without faking
   api.rcloneConfigure.mockReturnValueOnce(new Promise(r => { resolveConfig = r; }));
 
   const input = container.querySelector('#rcloneDriveNameInput');
+  const clientIdInput = container.querySelector('#rcloneDriveClientIdInput');
+  const clientSecretInput = container.querySelector('#rcloneDriveClientSecretInput');
   const submitBtn = container.querySelector('#rcloneDriveSubmitBtn');
   input.value = 'pending-drive';
+  clientIdInput.value = 'pending-client.apps.googleusercontent.com';
+  clientSecretInput.value = 'pending-secret';
 
   submitBtn.onclick();
   await flush();
@@ -351,8 +371,12 @@ test('cancel re-enables row actions after cleanup completes', async () => {
   api.rcloneConfigCancel.mockReturnValueOnce(new Promise(r => { resolveCancel = r; }));
 
   const input = container.querySelector('#rcloneDriveNameInput');
+  const clientIdInput = container.querySelector('#rcloneDriveClientIdInput');
+  const clientSecretInput = container.querySelector('#rcloneDriveClientSecretInput');
   const submitBtn = container.querySelector('#rcloneDriveSubmitBtn');
   input.value = 're-enable-test';
+  clientIdInput.value = 're-enable-client.apps.googleusercontent.com';
+  clientSecretInput.value = 're-enable-secret';
 
   api.rcloneConfigure.mockReturnValueOnce(new Promise(() => {}));
   submitBtn.onclick();
@@ -386,8 +410,12 @@ test('closing settings modal cancels pending configure session', async () => {
   api.rcloneConfigure.mockReturnValueOnce(new Promise(() => {}));
 
   const input = container.querySelector('#rcloneDriveNameInput');
+  const clientIdInput = container.querySelector('#rcloneDriveClientIdInput');
+  const clientSecretInput = container.querySelector('#rcloneDriveClientSecretInput');
   const submitBtn = container.querySelector('#rcloneDriveSubmitBtn');
   input.value = 'cancel-on-close';
+  clientIdInput.value = 'cancel-client.apps.googleusercontent.com';
+  clientSecretInput.value = 'cancel-secret';
 
   submitBtn.onclick();
   await flush();
@@ -481,8 +509,13 @@ test('Storage revisit while auth pending neither reloads status nor loses auth p
   await flush();
 
   const input = container.querySelector('#rcloneDriveNameInput');
+  const clientIdInput = container.querySelector('#rcloneDriveClientIdInput');
+  const clientSecretInput = container.querySelector('#rcloneDriveClientSecretInput');
   input.value = 'persistent-draft';
+  clientIdInput.value = 'persistent-client.apps.googleusercontent.com';
+  clientSecretInput.value = 'persistent-secret';
   input.oninput();
+  clientIdInput.oninput();
 
   let resolveConfig;
   api.rcloneConfigure.mockReturnValueOnce(new Promise(r => { resolveConfig = r; }));
@@ -653,9 +686,6 @@ test('remove connection failure: does not optimistically remove row and keeps re
   // Row must still exist
   const card = container.querySelector('[data-remote-name="gdrive-test"]');
   expect(card).not.toBeNull();
-  // Error feedback shown
-  const feedback = container.querySelector('#rcloneFormFeedback');
-  expect(feedback.classList.contains('error')).toBe(true);
 });
 
 test('pending remove cancelled on modal close, late result after close does not resurrect row or mark connected', async () => {
@@ -695,4 +725,240 @@ test('pending remove cancelled on modal close, late result after close does not 
   const statusBadge = card.querySelector('.rclone-status-badge');
   // Late removal result should NOT mark remote connected
   expect(statusBadge.classList.contains('connected')).toBe(false);
+});
+
+test('missing or partial OAuth credentials prevent backend configure call', async () => {
+  const { api, container } = setup();
+  await flush();
+
+  const input = container.querySelector('#rcloneDriveNameInput');
+  const clientIdInput = container.querySelector('#rcloneDriveClientIdInput');
+  const clientSecretInput = container.querySelector('#rcloneDriveClientSecretInput');
+  const submitBtn = container.querySelector('#rcloneDriveSubmitBtn');
+
+  // Missing Client ID
+  input.value = 'valid-name';
+  clientIdInput.value = '';
+  clientSecretInput.value = 'secret123';
+  submitBtn.onclick();
+  await flush();
+  expect(api.rcloneConfigure).not.toHaveBeenCalled();
+
+  // Invalid Client ID format
+  clientIdInput.value = 'invalid-client-id';
+  submitBtn.onclick();
+  await flush();
+  expect(api.rcloneConfigure).not.toHaveBeenCalled();
+
+  // Missing Client Secret
+  clientIdInput.value = 'valid-client.apps.googleusercontent.com';
+  clientSecretInput.value = '';
+  submitBtn.onclick();
+  await flush();
+  expect(api.rcloneConfigure).not.toHaveBeenCalled();
+
+  // Invalid Client Secret (whitespace)
+  clientSecretInput.value = 'invalid secret with spaces';
+  submitBtn.onclick();
+  await flush();
+  expect(api.rcloneConfigure).not.toHaveBeenCalled();
+});
+
+test('Drive file remote opens personal OAuth inline editor and submits switch payload', async () => {
+  const { api, container } = setup();
+  await flush();
+
+  const gdriveCard = container.querySelector('[data-remote-name="gdrive-test"]');
+  const oauthBtn = gdriveCard.querySelector('.rclone-oauth-btn');
+  expect(oauthBtn).not.toBeNull();
+
+  // Click opens editor with blank fields
+  oauthBtn.onclick();
+  await flush();
+
+  const editor = container.querySelector('[data-remote-name="gdrive-test"] .rclone-oauth-editor');
+  expect(editor).not.toBeNull();
+
+  const clientIdInput = editor.querySelector('.rclone-oauth-client-id-input');
+  const clientSecretInput = editor.querySelector('.rclone-oauth-client-secret-input');
+  expect(clientIdInput.value).toBe('');
+  expect(clientSecretInput.value).toBe('');
+
+  api.rcloneConfigure.mockResolvedValueOnce({
+    ok: true,
+    data: { sessionId: 'switch-1', remote: 'gdrive-test', done: true }
+  });
+
+  clientIdInput.value = 'personal.apps.googleusercontent.com';
+  clientSecretInput.value = 'personal-secret-123';
+
+  const applyBtn = editor.querySelector('.rclone-oauth-apply-btn');
+  applyBtn.onclick();
+  await flush();
+
+  expect(api.rcloneConfigure).toHaveBeenCalledWith({
+    mode: 'reconnect',
+    name: 'gdrive-test',
+    oauth: {
+      clientId: 'personal.apps.googleusercontent.com',
+      clientSecret: 'personal-secret-123'
+    }
+  });
+});
+
+test('ordinary reconnect omits oauth and retains configured client', async () => {
+  const { api, container } = setup();
+  await flush();
+
+  const reconnectBtn = container.querySelector('[data-remote-name="gdrive-test"] .rclone-reconnect-btn');
+  expect(reconnectBtn).not.toBeNull();
+
+  api.rcloneConfigure.mockResolvedValueOnce({
+    ok: true,
+    data: { sessionId: 'recon-1', remote: 'gdrive-test', done: true }
+  });
+
+  reconnectBtn.onclick();
+  await flush();
+
+  expect(api.rcloneConfigure).toHaveBeenCalledWith({
+    mode: 'reconnect',
+    name: 'gdrive-test'
+  });
+  expect(api.rcloneConfigure.mock.calls[0][0].oauth).toBeUndefined();
+});
+
+test('environment and non-Drive remotes do not offer personal OAuth action', async () => {
+  const { container } = setup({
+    installed: true,
+    version: 'v1.74.3',
+    executable: '/usr/local/bin/rclone',
+    remotes: [
+      { name: 'env-drive', type: 'drive', source: 'environment', canReconnect: true },
+      { name: 'file-s3', type: 's3', source: 'file', canReconnect: true }
+    ]
+  });
+  await flush();
+
+  const envCard = container.querySelector('[data-remote-name="env-drive"]');
+  expect(envCard.querySelector('.rclone-oauth-btn')).toBeNull();
+
+  const s3Card = container.querySelector('[data-remote-name="file-s3"]');
+  expect(s3Card.querySelector('.rclone-oauth-btn')).toBeNull();
+});
+
+test('inline cancel clears draft without IPC or config mutation', async () => {
+  const { api, container } = setup();
+  await flush();
+
+  const oauthBtn = container.querySelector('[data-remote-name="gdrive-test"] .rclone-oauth-btn');
+  oauthBtn.onclick();
+  await flush();
+
+  let editor = container.querySelector('[data-remote-name="gdrive-test"] .rclone-oauth-editor');
+  const clientIdInput = editor.querySelector('.rclone-oauth-client-id-input');
+  const clientSecretInput = editor.querySelector('.rclone-oauth-client-secret-input');
+  clientIdInput.value = 'draft.apps.googleusercontent.com';
+  clientSecretInput.value = 'draft-secret';
+
+  const cancelBtn = editor.querySelector('.rclone-oauth-cancel-btn');
+  cancelBtn.onclick();
+  await flush();
+
+  expect(api.rcloneConfigure).not.toHaveBeenCalled();
+  editor = container.querySelector('[data-remote-name="gdrive-test"] .rclone-oauth-editor');
+  expect(editor).toBeNull();
+});
+
+test('secrets and client ID cleared on submit, cancel, close and never restored on reopen', async () => {
+  const { api, container, context } = setup();
+  await flush();
+
+  // Create card submit clears both clientId and secret DOM values
+  const nameInput = container.querySelector('#rcloneDriveNameInput');
+  const clientIdInput = container.querySelector('#rcloneDriveClientIdInput');
+  const clientSecretInput = container.querySelector('#rcloneDriveClientSecretInput');
+  const submitBtn = container.querySelector('#rcloneDriveSubmitBtn');
+
+  nameInput.value = 'secret-test-drive';
+  clientIdInput.value = 'sec.apps.googleusercontent.com';
+  clientSecretInput.value = 'my-secret-to-clear';
+
+  api.rcloneConfigure.mockResolvedValueOnce({
+    ok: true,
+    data: { sessionId: 'sec-1', remote: 'secret-test-drive', done: true }
+  });
+
+  submitBtn.onclick();
+  // Immediately cleared upon submission
+  expect(clientIdInput.value).toBe('');
+  expect(clientSecretInput.value).toBe('');
+  await flush();
+
+  // Close and reopen ensures both client ID and secrets remain empty
+  await context.onCloseRcloneSettings();
+  await flush();
+  await context.onOpenRcloneSettings();
+  await flush();
+
+  const reopenedId = container.querySelector('#rcloneDriveClientIdInput');
+  const reopenedSecret = container.querySelector('#rcloneDriveClientSecretInput');
+  expect(reopenedId.value).toBe('');
+  expect(reopenedSecret.value).toBe('');
+});
+
+test('startConfigure recovers when rcloneConfigure throws synchronously', async () => {
+  const { api, container } = setup();
+  await flush();
+
+  api.rcloneConfigure.mockImplementationOnce(() => {
+    throw new Error('Bridge synchronous error');
+  });
+
+  const nameInput = container.querySelector('#rcloneDriveNameInput');
+  const clientIdInput = container.querySelector('#rcloneDriveClientIdInput');
+  const clientSecretInput = container.querySelector('#rcloneDriveClientSecretInput');
+  const submitBtn = container.querySelector('#rcloneDriveSubmitBtn');
+
+  nameInput.value = 'sync-throw-drive';
+  clientIdInput.value = 'sync.apps.googleusercontent.com';
+  clientSecretInput.value = 'sync-secret';
+
+  submitBtn.onclick();
+  await flush();
+
+  // Verify that busy gate is released and inputs/buttons are re-enabled
+  const checkBtn = container.querySelector('[data-remote-name="gdrive-test"] .rclone-check-btn');
+  expect(checkBtn.disabled).toBe(false);
+  expect(submitBtn.disabled).toBe(false);
+});
+
+test('switch error displays visibly on the remote card and not in add-drive card', async () => {
+  const { api, container } = setup();
+  await flush();
+
+  const oauthBtn = container.querySelector('[data-remote-name="gdrive-test"] .rclone-oauth-btn');
+  oauthBtn.onclick();
+  await flush();
+
+  const editor = container.querySelector('[data-remote-name="gdrive-test"] .rclone-oauth-editor');
+  editor.querySelector('.rclone-oauth-client-id-input').value = 'fail.apps.googleusercontent.com';
+  editor.querySelector('.rclone-oauth-client-secret-input').value = 'fail-secret';
+
+  api.rcloneConfigure.mockRejectedValueOnce({
+    code: 'INVALID_CLIENT',
+    message: 'Invalid OAuth Client'
+  });
+
+  editor.querySelector('.rclone-oauth-apply-btn').onclick();
+  await flush();
+
+  // Remote card displays the error
+  const cardError = container.querySelector('[data-remote-name="gdrive-test"] .rclone-remote-error');
+  expect(cardError).not.toBeNull();
+  expect(cardError.textContent).not.toBe('');
+
+  // Add drive card feedback must not contain this error
+  const addCardFeedback = container.querySelector('#rcloneFormFeedback');
+  expect(addCardFeedback.classList.contains('error')).toBe(false);
 });

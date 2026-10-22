@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { createHash } = require('crypto');
 const { Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { pathToFileURL } = require('url');
@@ -9,7 +10,10 @@ const { RcloneConfig } = require('./rcloneConfig');
 const ERROR_MESSAGES = {
   NOT_INSTALLED: 'rclone was not found. Select its executable or install rclone.',
   AUTH_REQUIRED: 'This connection needs browser authentication again.',
+  INVALID_CLIENT: 'Check the Client ID and Client secret for your Google Cloud Desktop app.',
   NETWORK: 'The storage service could not be reached. Check the network connection.',
+  RATE_LIMIT: 'The storage service is limiting requests. Wait a moment and try again; signing in again is not required.',
+  DUPLICATE_FILES: 'This folder contains recording or event files with conflicting names and cannot be downloaded safely.',
   PERMISSION: 'Access was denied. Check folder access and local configuration permissions.',
   CONFIG_LOCKED: 'The rclone configuration is locked or cannot be edited by this app.',
   CONFIG_CONFLICT: 'The rclone configuration changed during sign-in. Please try again.',
@@ -36,7 +40,8 @@ function validatePath(value) {
 class RcloneBrowser {
   constructor({ cacheParent, spawnProcess = spawn, maxBytes = 2 * 1024 ** 3, timeoutMs = 600000, executable = 'rclone' }) {
     Object.assign(this, { cacheParent, spawn: spawnProcess, maxBytes, timeoutMs, executable });
-    this.remotes = new Set(); this.children = new Set(); this.bytes = 0;
+    this.remotes = new Set(); this.remoteTypes = new Map(); this.folders = new Map();
+    this.children = new Set(); this.bytes = 0;
   }
   async exclusive(fn) {
     if (this.closed) throw commandError('CANCELLED');
@@ -50,9 +55,18 @@ class RcloneBrowser {
       finish();
     }
   }
-  target(remote, folder) {
+  folderContext(remote, folder) {
     if (!this.remotes.has(remote)) throw new Error('Choose a configured remote first.');
-    return `${remote}:${validatePath(folder)}`;
+    if (folder === '') return { remote, parts: [], id: null };
+    const context = typeof folder === 'string' && this.folders.get(folder);
+    if (!context || context.remote !== remote) throw commandError('INVALID_INPUT');
+    return context;
+  }
+  sourceArgs(remote, folder, filename = '') {
+    const context = this.folderContext(remote, folder);
+    if (filename && !safeName(filename)) throw commandError('INVALID_INPUT');
+    const relative = context.id ? filename : validatePath([...context.parts, ...(filename ? [filename] : [])].join('/'));
+    return [...(context.id ? ['--drive-root-folder-id', context.id] : []), '--', `${remote}:${relative}`];
   }
   command(args, onData, options = {}) {
     if (this.cancelled || this.closed) return Promise.reject(commandError('CANCELLED'));
@@ -64,13 +78,15 @@ class RcloneBrowser {
       this.children.add(child);
       let failure, diagnosticTail = '';
       const diagnostics = new Set();
-      const timer = setTimeout(() => { failure = commandError('TIMEOUT'); child.kill('SIGKILL'); }, options.timeoutMs ?? this.timeoutMs);
+      const timer = setTimeout(() => { failure = commandError(diagnostics.has('RATE_LIMIT') ? 'RATE_LIMIT' : 'TIMEOUT'); child.kill('SIGKILL'); }, options.timeoutMs ?? this.timeoutMs);
       // Classify a bounded rolling window only. Never return or log backend stderr.
       child.stderr.on('data', chunk => {
         const text = diagnosticTail + chunk.toString('utf8');
-        if (/invalid_grant|invalid_token|empty token found|token.{0,40}(expired|revoked)|unauthenticated|401 unauthorized/i.test(text)) diagnostics.add('AUTH_REQUIRED');
+        if (/invalid_grant|invalid_token|empty token found|token.{0,40}(expired|revoked)|unauthenticated|401 unauthorized|googleapi: Error 401\b/i.test(text)) diagnostics.add('AUTH_REQUIRED');
+        if (/invalid_client|unauthorized_client|deleted_client|redirect_uri_mismatch/i.test(text)) diagnostics.add('INVALID_CLIENT');
         if (/config.{0,50}(encrypted|password)|failed to decrypt|unable to decrypt/i.test(text)) diagnostics.add('CONFIG_LOCKED');
-        if (/permission denied|access denied|insufficient.{0,20}permission|403 forbidden/i.test(text)) diagnostics.add('PERMISSION');
+        if (/rateLimitExceeded|userRateLimitExceeded|dailyLimitExceeded|downloadQuotaExceeded|quotaExceeded|429 Too Many Requests|googleapi: Error 429\b/i.test(text)) diagnostics.add('RATE_LIMIT');
+        if (/permission denied|access denied|insufficient.{0,20}permission|403 forbidden|googleapi: Error 403\b/i.test(text)) diagnostics.add('PERMISSION');
         if (/no such host|network is unreachable|connection refused|dial tcp|TLS handshake timeout|i\/o timeout/i.test(text)) diagnostics.add('NETWORK');
         if (/unknown flag|unknown command/i.test(text)) diagnostics.add('UNSUPPORTED');
         diagnosticTail = text.slice(-1024);
@@ -84,7 +100,7 @@ class RcloneBrowser {
         diagnosticTail = '';
         if (this.cancelled || this.closed) reject(commandError('CANCELLED'));
         else if (failure) reject(failure);
-        else if (code !== 0) reject(commandError(['CONFIG_LOCKED', 'AUTH_REQUIRED', 'PERMISSION', 'NETWORK', 'UNSUPPORTED'].find(value => diagnostics.has(value)) || 'REMOTE_ERROR'));
+        else if (code !== 0) reject(commandError(['CONFIG_LOCKED', 'INVALID_CLIENT', 'AUTH_REQUIRED', 'RATE_LIMIT', 'PERMISSION', 'NETWORK', 'UNSUPPORTED'].find(value => diagnostics.has(value)) || 'REMOTE_ERROR'));
         else resolve();
       });
     });
@@ -102,23 +118,44 @@ class RcloneBrowser {
   }
   listRemotes() {
     return this.exclusive(async () => {
-      const text = await this.text(['listremotes']);
-      this.remotes = new Set(text.split(/\r?\n/).filter(Boolean).map(line => line.replace(/:$/, '')).filter(name => /^[A-Za-z0-9_][A-Za-z0-9 _.-]{1,127}$/.test(name)));
+      let rows;
+      try { rows = JSON.parse(await this.text(['listremotes', '--json'])); } catch (error) {
+        if (error instanceof SyntaxError) throw commandError('UNSUPPORTED');
+        throw error;
+      }
+      if (!Array.isArray(rows)) throw commandError('UNSUPPORTED');
+      this.remoteTypes = new Map(rows.filter(row => row && typeof row.name === 'string' && /^[A-Za-z0-9_][A-Za-z0-9 _.-]{1,127}$/.test(row.name) && typeof row.type === 'string').map(row => [row.name, row.type]));
+      this.remotes = new Set(this.remoteTypes.keys()); this.folders.clear();
       return [...this.remotes].sort();
     });
   }
   async entries(remote, folder) {
-    const text = await this.text(['lsjson', '--max-depth', '1', '--', this.target(remote, folder)]);
+    const context = this.folderContext(remote, folder);
+    const drive = this.remoteTypes.get(remote) === 'drive';
+    const text = await this.text(['lsjson', '--low-level-retries', '5', '--max-depth', '1', ...this.sourceArgs(remote, folder)], { timeoutMs: 120000 });
     let result;
     try { result = JSON.parse(text); } catch { throw new Error('rclone returned an invalid folder listing.'); }
     if (!Array.isArray(result) || result.length > 10000) throw new Error('Unsupported remote listing.');
-    const names = new Set();
+    if (!drive) {
+      const directories = new Set();
+      for (const entry of result) {
+        if (!entry?.IsDir) continue;
+        if (directories.has(entry.Name)) throw commandError('UNSUPPORTED');
+        directories.add(entry.Name);
+      }
+    }
     return result.map(entry => {
-      if (!entry || !safeName(entry.Name) || entry.Path !== entry.Name || typeof entry.IsDir !== 'boolean') throw new Error('Remote contains unsupported file or folder names.');
-      const key = entry.Name.toLowerCase();
-      if (names.has(key)) throw new Error('Remote has duplicate filenames that cannot be safely cached.');
-      names.add(key);
-      return { name: entry.Name, isDirectory: entry.IsDir, size: entry.Size, playable: !entry.IsDir && CLIP.test(entry.Name) };
+      if (!entry || typeof entry.Name !== 'string' || !entry.Name || entry.Path !== entry.Name || typeof entry.IsDir !== 'boolean') throw commandError('REMOTE_ERROR');
+      const result = { name: entry.Name, isDirectory: entry.IsDir, size: entry.Size, playable: !entry.IsDir && CLIP.test(entry.Name) };
+      if (entry.IsDir) {
+        if (drive ? typeof entry.ID !== 'string' || !/^[A-Za-z0-9_-]{1,256}(?:\t[A-Za-z0-9_-]{1,256})?$/.test(entry.ID) : !safeName(entry.Name)) throw commandError('UNSUPPORTED');
+        // rclone represents shortcuts as target ID + tab + shortcut ID.
+        const id = drive ? entry.ID.split('\t')[0] : null;
+        result.folder = createHash('sha256').update(JSON.stringify([remote, folder, drive ? entry.ID : entry.Name])).digest('hex');
+        if (drive) result.id = entry.ID.split('\t').at(-1);
+        this.folders.set(result.folder, { remote, parts: [...context.parts, entry.Name], id });
+      }
+      return result;
     });
   }
   list(remote, folder) { return this.exclusive(() => this.entries(remote, folder)); }
@@ -127,6 +164,13 @@ class RcloneBrowser {
       const entries = await this.entries(remote, folder);
       const files = entries.filter(e => e.playable || (!e.isDirectory && /^(event\.json|event\.png|thumb\.png)$/i.test(e.name)));
       if (!files.some(e => e.playable)) throw new Error('Open a folder containing TeslaCam MP4 recordings first. Subfolders are not downloaded.');
+      const names = new Set();
+      for (const file of files) {
+        if (!safeName(file.name)) throw commandError('INVALID_INPUT');
+        const key = file.name.toLowerCase();
+        if (names.has(key)) throw commandError('DUPLICATE_FILES');
+        names.add(key);
+      }
       let total = 0;
       for (const file of files) {
         if (!Number.isSafeInteger(file.size) || file.size < 0) throw new Error('Remote did not provide a valid file size.');
@@ -144,7 +188,7 @@ class RcloneBrowser {
       const directory = await fs.promises.mkdtemp(path.join(this.root, 'recording-'));
       try {
         // Keep TeslaCam event structure so existing metadata/markers still attach.
-        const parts = folder.split('/');
+        const parts = this.folderContext(remote, folder).parts;
         const eventId = parts.at(-1);
         const category = /^(sentryclips|savedclips)$/i.test(parts.at(-2) || '')
           ? (/^sentry/i.test(parts.at(-2)) ? 'SentryClips' : 'SavedClips') : null;
@@ -160,7 +204,7 @@ class RcloneBrowser {
           const output = fs.createWriteStream(path.join(downloadDirectory, file.name), { flags: fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), mode: 0o600 });
           const transfer = pipeline(limiter, output); transfer.catch(() => {});
           try {
-            await this.command(['cat', '--max-depth', '1', '--', this.target(remote, folder ? `${folder}/${file.name}` : file.name)], async input => {
+            await this.command(['cat', '--max-depth', '1', ...this.sourceArgs(remote, folder, file.name)], async input => {
               await pipeline(input, limiter); await transfer;
             });
             await transfer;
@@ -169,7 +213,7 @@ class RcloneBrowser {
         }
         if (this.cancelled || this.closed) throw new Error('Remote operation cancelled.');
         this.bytes += total;
-        return { directory, source: { kind: 'rclone', remote, folder }, fileCount: files.filter(e => e.playable).length };
+        return { directory, source: { kind: 'rclone', remote, folder: parts.join('/') }, fileCount: files.filter(e => e.playable).length };
       } catch (error) { await fs.promises.rm(directory, { recursive: true, force: true }); throw error; }
     });
   }
@@ -188,6 +232,7 @@ class RcloneBrowser {
   }
   dispose() {
     this.closed = true; this.cancel();
+    this.folders.clear();
     if (!this.busy) this.cleanup();
   }
 }
@@ -201,7 +246,9 @@ function registerRcloneIpc({ ipcMain, app, getMainWindow, executable = 'rclone' 
         event.senderFrame.url !== pathToFileURL(path.join(__dirname, '../renderer/index.html')).href) throw new Error('Untrusted remote browser request.');
     try {
       if (browsing && (config.active || choosingExecutable)) throw commandError('BUSY');
-      return { ok: true, data: (await fn(...args)) ?? null };
+      const pending = fn(...args);
+      args.length = 0;
+      return { ok: true, data: (await pending) ?? null };
     } catch (error) {
       const code = Object.hasOwn(ERROR_MESSAGES, error.code) ? error.code : 'REMOTE_ERROR';
       return { ok: false, error: { code, message: ERROR_MESSAGES[code] } };
