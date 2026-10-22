@@ -46,6 +46,14 @@ or cancellation does not publish the draft. Do not edit the same configuration
 in another process during authentication: independent writers do not share an
 atomic compare-and-swap lock. Only one app operation runs at a time.
 
+**Remove connection** requires confirmation and removes only the selected entry
+from the shared local rclone configuration, including for other apps using that
+file. It does not delete cloud files or revoke account permissions. Removal also
+works without valid cloud credentials. It runs `config delete` on a private copy,
+checks that the target is gone and other connections remain, then uses the same
+conflict check and atomic replacement. Environment-managed connections cannot
+be removed here; change their environment configuration instead.
+
 Encrypted, read-only, symlinked and environment-overridden configurations cannot
 be edited here. The app reports the limitation instead of overwriting them.
 Browser authentication expires after ten minutes; cancel or close settings to

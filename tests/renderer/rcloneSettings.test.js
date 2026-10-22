@@ -554,3 +554,145 @@ test('explicit row Open folder overrides and triggers only explicit opener', asy
   expect(onOpenRemoteFolder).toHaveBeenCalledWith('gdrive-test');
   expect(onOpenRemoteFolder).toHaveBeenCalledTimes(1);
 });
+
+test('remove connection flow: confirm/cancel and environment remote restriction', async () => {
+  const { container, api, document } = setup();
+  await flush();
+
+  const envCard = container.querySelector('[data-remote-name="env-s3"]');
+  const envRemoveBtn = envCard.querySelector('.rclone-remove-btn');
+  expect(envRemoveBtn.disabled).toBe(true);
+
+  const gdriveCard = container.querySelector('[data-remote-name="gdrive-test"]');
+  const removeBtn = gdriveCard.querySelector('.rclone-remove-btn');
+  expect(removeBtn.disabled).toBe(false);
+
+  // Click remove connection button to open inline confirmation
+  removeBtn.onclick();
+  await flush();
+
+  // No backend call before confirm
+  expect(api.rcloneConfigure).not.toHaveBeenCalled();
+
+  let confirmBox = container.querySelector('[data-remote-name="gdrive-test"] .rclone-remove-confirm');
+  expect(confirmBox).not.toBeNull();
+  expect(confirmBox.querySelector('.rclone-remove-confirm-title').textContent).toContain('gdrive-test');
+
+  // Cancel button receives focus for accessibility
+  const cancelBtn = confirmBox.querySelector('.rclone-remove-cancel-btn');
+  expect(document.activeElement).toBe(cancelBtn);
+
+  // Click cancel: leaves state unchanged and hides confirmation
+  cancelBtn.onclick();
+  await flush();
+
+  expect(api.rcloneConfigure).not.toHaveBeenCalled();
+  confirmBox = container.querySelector('[data-remote-name="gdrive-test"] .rclone-remove-confirm');
+  expect(confirmBox).toBeNull();
+
+  // Focus returns to remove button after cancel
+  const restoredRemoveBtn = container.querySelector('[data-remote-name="gdrive-test"] .rclone-remove-btn');
+  expect(document.activeElement).toBe(restoredRemoveBtn);
+});
+
+test('remove connection success: unwrap, clear remoteStates, reload status and feedback', async () => {
+  const { container, api } = setup();
+  await flush();
+
+  const gdriveCard = container.querySelector('[data-remote-name="gdrive-test"]');
+  gdriveCard.querySelector('.rclone-remove-btn').onclick();
+  await flush();
+
+  api.rcloneConfigure.mockResolvedValueOnce({
+    ok: true,
+    data: { sessionId: 'rem-1', remote: 'gdrive-test', done: true }
+  });
+
+  // When status reloads after remove, gdrive-test is gone
+  api.rcloneStatus.mockResolvedValueOnce({
+    ok: true,
+    data: {
+      installed: true,
+      version: 'v1.74.3',
+      executable: '/usr/local/bin/rclone',
+      remotes: [{ name: 'env-s3', type: 's3', source: 'environment', canReconnect: false }]
+    }
+  });
+
+  const executeBtn = container.querySelector('[data-remote-name="gdrive-test"] .rclone-remove-execute-btn');
+  executeBtn.onclick();
+  await flush();
+
+  expect(api.rcloneConfigure).toHaveBeenCalledWith({ mode: 'remove', name: 'gdrive-test' });
+  expect(api.rcloneStatus).toHaveBeenCalled();
+
+  // Row should no longer exist after reload
+  expect(container.querySelector('[data-remote-name="gdrive-test"]')).toBeNull();
+  // Feedback should indicate success
+  const feedback = container.querySelector('#rcloneFormFeedback');
+  expect(feedback.classList.contains('success')).toBe(true);
+  expect(feedback.textContent).toContain('gdrive-test');
+});
+
+test('remove connection failure: does not optimistically remove row and keeps remote', async () => {
+  const { container, api } = setup();
+  await flush();
+
+  container.querySelector('[data-remote-name="gdrive-test"] .rclone-remove-btn').onclick();
+  await flush();
+
+  api.rcloneConfigure.mockResolvedValueOnce({
+    ok: false,
+    error: { code: 'PERMISSION', message: 'Permission denied' }
+  });
+
+  const executeBtn = container.querySelector('[data-remote-name="gdrive-test"] .rclone-remove-execute-btn');
+  executeBtn.onclick();
+  await flush();
+
+  // Row must still exist
+  const card = container.querySelector('[data-remote-name="gdrive-test"]');
+  expect(card).not.toBeNull();
+  // Error feedback shown
+  const feedback = container.querySelector('#rcloneFormFeedback');
+  expect(feedback.classList.contains('error')).toBe(true);
+});
+
+test('pending remove cancelled on modal close, late result after close does not resurrect row or mark connected', async () => {
+  let resolveConfigure;
+  const pendingConfig = new Promise(r => { resolveConfigure = r; });
+  const { container, api, context } = setup();
+  await flush();
+
+  container.querySelector('[data-remote-name="gdrive-test"] .rclone-remove-btn').onclick();
+  await flush();
+
+  api.rcloneConfigure.mockReturnValueOnce(pendingConfig);
+  const executeBtn = container.querySelector('[data-remote-name="gdrive-test"] .rclone-remove-execute-btn');
+  executeBtn.onclick();
+  await flush();
+
+  // Competing actions disabled while pending
+  const checkBtn = container.querySelector('[data-remote-name="gdrive-test"] .rclone-check-btn');
+  expect(checkBtn.disabled).toBe(true);
+
+  // Close modal while remove is pending
+  const closePromise = context.onCloseRcloneSettings();
+  expect(api.rcloneConfigCancel).toHaveBeenCalled();
+
+  resolveConfigure({ ok: true, data: { sessionId: 'rem-2', remote: 'gdrive-test', done: true } });
+  await closePromise;
+  await flush();
+
+  // Reopen settings
+  await context.onOpenRcloneSettings();
+  await flush();
+
+  // Confirmation is cleared on reopen
+  expect(container.querySelector('.rclone-remove-confirm')).toBeNull();
+  const card = container.querySelector('[data-remote-name="gdrive-test"]');
+  expect(card).not.toBeNull();
+  const statusBadge = card.querySelector('.rclone-status-badge');
+  // Late removal result should NOT mark remote connected
+  expect(statusBadge.classList.contains('connected')).toBe(false);
+});

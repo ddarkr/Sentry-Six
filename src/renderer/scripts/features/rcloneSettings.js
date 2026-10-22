@@ -20,6 +20,8 @@ let inFlightStatusPromise = null;
 let draftRemoteName = 'gdrive';
 let activeAuthState = null;
 let activeFeedback = null;
+let confirmingRemoveRemote = null;
+let focusTargetRemoteOnRender = null;
 
 // Remote connection states: remoteName -> { state: 'unchecked' | 'checking' | 'connected' | 'auth-required' | 'error', errorMsg?: string }
 const remoteStates = new Map();
@@ -106,6 +108,8 @@ export async function cancelConfigSession() {
  */
 export async function onCloseRcloneSettings() {
     isSettingsOpen = false;
+    confirmingRemoveRemote = null;
+    focusTargetRemoteOnRender = null;
     lifecycleGeneration++;
 
     const cancelAuth = cancelConfigSession();
@@ -143,6 +147,8 @@ export async function onOpenRcloneSettings(selectedRemote = null, options = {}) 
     isSettingsOpen = true;
 
     if (isNewVisit) {
+        confirmingRemoveRemote = null;
+        focusTargetRemoteOnRender = null;
         resetConfiguredRemoteForVisit();
         ++lifecycleGeneration;
     }
@@ -246,6 +252,18 @@ function render() {
     renderStatusCard();
     renderRemotesList();
     renderAddDriveCard();
+
+    if (focusTargetRemoteOnRender) {
+        const { remoteName, action } = focusTargetRemoteOnRender;
+        focusTargetRemoteOnRender = null;
+        if (action === 'cancel') {
+            const cancelBtn = containerEl.querySelector(`[data-remote-name="${CSS.escape(remoteName)}"] .rclone-remove-cancel-btn`);
+            cancelBtn?.focus();
+        } else if (action === 'remove') {
+            const removeBtn = containerEl.querySelector(`[data-remote-name="${CSS.escape(remoteName)}"] .rclone-remove-btn`);
+            removeBtn?.focus();
+        }
+    }
 }
 
 function renderStatusCard() {
@@ -476,7 +494,71 @@ function createRemoteCard(remote) {
     };
     actions.append(openBtn);
 
+    const canRemove = remote.source === 'file';
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'btn btn-danger btn-small rclone-remove-btn';
+    removeBtn.dataset.action = 'remove';
+    removeBtn.type = 'button';
+    removeBtn.textContent = t('ui.rclone.removeConnection');
+    if (!canRemove) {
+        removeBtn.disabled = true;
+        removeBtn.title = t('ui.rclone.cannotRemoveEnv');
+    } else {
+        removeBtn.disabled = actionsDisabled;
+        removeBtn.onclick = () => {
+            if (isAnyActionBusy()) return;
+            confirmingRemoveRemote = remote.name;
+            focusTargetRemoteOnRender = { remoteName: remote.name, action: 'cancel' };
+            render();
+        };
+    }
+    actions.append(removeBtn);
+
     card.append(actions);
+
+    if (confirmingRemoveRemote === remote.name) {
+        const confirmBox = document.createElement('div');
+        confirmBox.className = 'rclone-question-container rclone-remove-confirm';
+        confirmBox.style.overflowWrap = 'anywhere';
+
+        const confirmTitle = document.createElement('div');
+        confirmTitle.className = 'rclone-card-title rclone-remove-confirm-title';
+        confirmTitle.textContent = t('ui.rclone.removeConfirmTitle', { remote: remote.name });
+
+        const confirmDesc = document.createElement('div');
+        confirmDesc.className = 'rclone-card-desc rclone-remove-confirm-desc';
+        confirmDesc.textContent = t('ui.rclone.removeConfirmDesc');
+
+        const confirmActions = document.createElement('div');
+        confirmActions.className = 'rclone-remote-actions rclone-remove-confirm-actions';
+
+        const cancelRemoveBtn = document.createElement('button');
+        cancelRemoveBtn.className = 'btn btn-secondary btn-small rclone-remove-cancel-btn';
+        cancelRemoveBtn.type = 'button';
+        cancelRemoveBtn.textContent = t('ui.rclone.cancel');
+        cancelRemoveBtn.disabled = isAnyActionBusy();
+        cancelRemoveBtn.onclick = () => {
+            if (isAnyActionBusy()) return;
+            confirmingRemoveRemote = null;
+            focusTargetRemoteOnRender = { remoteName: remote.name, action: 'remove' };
+            render();
+        };
+
+        const executeRemoveBtn = document.createElement('button');
+        executeRemoveBtn.className = 'btn btn-danger btn-small rclone-remove-execute-btn';
+        executeRemoveBtn.type = 'button';
+        executeRemoveBtn.textContent = t('ui.rclone.removeConfirmBtn');
+        executeRemoveBtn.disabled = isAnyActionBusy();
+        executeRemoveBtn.onclick = () => {
+            if (isAnyActionBusy()) return;
+            startConfigure({ mode: 'remove', name: remote.name });
+        };
+
+        confirmActions.append(cancelRemoveBtn, executeRemoveBtn);
+        confirmBox.append(confirmTitle, confirmDesc, confirmActions);
+        card.append(confirmBox);
+    }
+
     return card;
 }
 
@@ -650,18 +732,20 @@ async function startConfigure({ mode, name }) {
     enableFormControls(false);
     showFeedback(null);
 
-    const authState = {
-        title: t('ui.rclone.awaitingSignIn'),
-        desc: t('ui.rclone.awaitingSignInDesc'),
-        showSpinner: true,
-        question: null
-    };
-    activeAuthState = authState;
-    renderAuthPanel(authState);
+    if (mode !== 'remove') {
+        const authState = {
+            title: t('ui.rclone.awaitingSignIn'),
+            desc: t('ui.rclone.awaitingSignInDesc'),
+            showSpinner: true,
+            question: null
+        };
+        activeAuthState = authState;
+        renderAuthPanel(authState);
 
-    const authPanelEl = document.getElementById('rcloneAuthPanel');
-    if (authPanelEl) {
-        authPanelEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const authPanelEl = document.getElementById('rcloneAuthPanel');
+        if (authPanelEl) {
+            authPanelEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
     }
 
     try {
@@ -670,7 +754,7 @@ async function startConfigure({ mode, name }) {
         );
 
         if (currentGen !== configGeneration || !isSettingsOpen) return;
-        await handleConfigResult(res, currentGen);
+        await handleConfigResult(res, currentGen, mode);
     } catch (err) {
         if (currentGen !== configGeneration || !isSettingsOpen) return;
         configSessionActive = false;
@@ -682,7 +766,7 @@ async function startConfigure({ mode, name }) {
     }
 }
 
-async function handleConfigResult(result, currentGen) {
+async function handleConfigResult(result, currentGen, mode) {
     if (currentGen !== configGeneration || !isSettingsOpen) return;
 
     if (!result) {
@@ -697,11 +781,24 @@ async function handleConfigResult(result, currentGen) {
     if (result.done) {
         configSessionActive = false;
         activeAuthState = null;
-        newConfiguredRemoteThisVisit = result.remote;
-        remoteStates.set(result.remote, { state: 'connected' });
         renderAuthPanel(null);
         enableFormControls(true);
-        showFeedback(t('ui.rclone.configSuccess', { remote: result.remote }), 'success');
+
+        if (mode === 'remove') {
+            remoteStates.delete(result.remote);
+            if (newConfiguredRemoteThisVisit === result.remote) {
+                newConfiguredRemoteThisVisit = null;
+            }
+            if (confirmingRemoveRemote === result.remote) {
+                confirmingRemoveRemote = null;
+            }
+            showFeedback(t('ui.rclone.removeSuccess', { remote: result.remote }), 'success');
+        } else {
+            newConfiguredRemoteThisVisit = result.remote;
+            remoteStates.set(result.remote, { state: 'connected' });
+            showFeedback(t('ui.rclone.configSuccess', { remote: result.remote }), 'success');
+        }
+
         await loadStatus();
         return;
     }

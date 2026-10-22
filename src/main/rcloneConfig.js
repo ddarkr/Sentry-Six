@@ -75,7 +75,7 @@ class RcloneConfig {
   configure(request) {
     if (this.closed) return Promise.reject(failure('CANCELLED'));
     if (this.active || this.browser.busy) return Promise.reject(failure('BUSY'));
-    if (!request || !['create', 'reconnect'].includes(request.mode) || !validName(request.name)) return Promise.reject(failure('INVALID_INPUT'));
+    if (!request || !['create', 'reconnect', 'remove'].includes(request.mode) || !validName(request.name)) return Promise.reject(failure('INVALID_INPUT'));
     // Reserve before any asynchronous work, so cancellation also covers filesystem preparation.
     const session = { id: randomBytes(24).toString('hex'), name: request.name, mode: request.mode, cancelled: false };
     this.active = session;
@@ -90,6 +90,7 @@ class RcloneConfig {
       const matches = remotes.filter(row => row.name.toLowerCase() === session.name.toLowerCase());
       if (session.mode === 'create' ? matches.length > 0 : matches.length !== 1 || matches[0].name !== session.name) throw failure('INVALID_INPUT');
       if (session.mode === 'reconnect' && !matches[0].canReconnect) throw failure('CONFIG_LOCKED');
+      if (session.mode === 'remove' && matches[0].source !== 'file') throw failure('CONFIG_LOCKED');
       let ancestor = path.dirname(session.filename);
       while (!fs.existsSync(ancestor)) ancestor = path.dirname(ancestor);
       fs.accessSync(ancestor, fs.constants.W_OK);
@@ -103,6 +104,18 @@ class RcloneConfig {
       const prefix = `RCLONE_CONFIG_${session.name.toUpperCase()}_`;
       if (Object.keys(process.env).some(key => key.toUpperCase().startsWith(prefix) || key.toUpperCase().startsWith('RCLONE_DRIVE_'))) throw failure('CONFIG_LOCKED');
       this.assertActive(session);
+      if (session.mode === 'remove') {
+        await this.text(['config', 'delete', session.name], session.options); this.assertActive(session);
+        const remaining = new Map((await this.metadata(session.options)).map(remote => [remote.name, remote.type]));
+        this.assertActive(session);
+        const expected = remotes.filter(remote => remote.name !== session.name);
+        if (remaining.has(session.name) || remaining.size !== expected.length ||
+            expected.some(remote => remaining.get(remote.name) !== remote.type)) throw failure('REMOTE_ERROR');
+        this.commit(session);
+        this.browser.remotes.delete(session.name);
+        await this.cleanup(session);
+        return { sessionId: session.id, remote: session.name, done: true };
+      }
       const args = session.mode === 'create'
         ? ['config', 'create', session.name, 'drive', 'scope', 'drive.readonly', '--non-interactive']
         : ['config', 'update', session.name, '--non-interactive'];

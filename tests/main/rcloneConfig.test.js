@@ -15,7 +15,7 @@ describe('transactional cloud configuration', () => {
     calls = []; replies = []; remotes = [{ name: 'old', type: 'drive', source: 'file' }];
     probe = async () => [];
     browser = {
-      executable: '/isolated/rclone', busy: false,
+      executable: '/isolated/rclone', busy: false, remotes: new Set(['old', 'other']),
       async exclusive(fn) { if (this.busy) throw Object.assign(new Error('busy'), { code: 'BUSY' }); this.busy = true; try { return await fn(); } finally { this.busy = false; } },
       cancel: jest.fn(),
       async text(args, options) {
@@ -36,6 +36,12 @@ describe('transactional cloud configuration', () => {
           }
           const next = replies.shift();
           if (typeof next === 'function') return JSON.stringify(await next(args, options));
+          if (args.includes('delete')) {
+            const name = args[args.indexOf('delete') + 1];
+            const content = fs.readFileSync(options.env.RCLONE_CONFIG, 'utf8');
+            fs.writeFileSync(options.env.RCLONE_CONFIG, content.split(/(?=^\[)/m).filter(section => !section.startsWith(`[${name}]\n`)).join(''));
+            return '';
+          }
           return JSON.stringify(next || done);
         }
         throw new Error('unexpected fixture command');
@@ -173,5 +179,83 @@ describe('transactional cloud configuration', () => {
     expect(status.executable).toBe('/isolated/rclone');
     expect(JSON.stringify(status)).not.toContain('private');
     expect(status.remotes[0].canReconnect).toBe(true);
+  });
+  describe('connection removal', () => {
+    beforeEach(() => { remotes.push({ name: 'other', type: 'local', source: 'file' }); });
+    test.each(['old', 'other'])('removes only %s without contacting cloud storage', async name => {
+      probe = async () => { throw new Error('Cloud access must not be needed to remove a connection'); };
+      const expected = original.split(/(?=^\[)/m).filter(section => !section.startsWith(`[${name}]\n`)).join('');
+      const result = await config.configure({ mode: 'remove', name });
+      expect(result).toMatchObject({ done: true, remote: name });
+      expect(fs.readFileSync(filename, 'utf8')).toBe(expected);
+      expect(browser.remotes.has(name)).toBe(false);
+      expect(calls.some(call => call.args.includes('lsjson'))).toBe(false);
+      expect(fs.readdirSync(temp)).toEqual(['rclone.conf']);
+    });
+    test.each(['missing', 'OLD', '../old'])('rejects unconfigured or invalid target %s', async name => {
+      await expect(config.configure({ mode: 'remove', name })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+      expect(fs.readFileSync(filename, 'utf8')).toBe(original);
+    });
+    test('does not remove environment-managed connections', async () => {
+      remotes[0].source = 'environment';
+      await expect(config.configure({ mode: 'remove', name: 'old' })).rejects.toMatchObject({ code: 'CONFIG_LOCKED' });
+      expect(fs.readFileSync(filename, 'utf8')).toBe(original);
+    });
+    test('does not remove a file connection overridden by environment credentials', async () => {
+      const key = 'RCLONE_CONFIG_OLD_TOKEN';
+      const previous = process.env[key];
+      process.env[key] = 'private-secret';
+      try {
+        await expect(config.configure({ mode: 'remove', name: 'old' })).rejects.toMatchObject({ code: 'CONFIG_LOCKED' });
+        expect(fs.readFileSync(filename, 'utf8')).toBe(original);
+      } finally {
+        if (previous === undefined) delete process.env[key]; else process.env[key] = previous;
+      }
+    });
+    test.each(['unchanged', 'lost-other', 'failed'])('preserves config when delete is %s', async outcome => {
+      replies.push(async (args, options) => {
+        if (outcome === 'failed') throw Object.assign(new Error('private-secret'), { code: 'PERMISSION' });
+        if (outcome === 'lost-other') fs.writeFileSync(options.env.RCLONE_CONFIG, '');
+        return done;
+      });
+      await expect(config.configure({ mode: 'remove', name: 'old' })).rejects.toMatchObject({ code: outcome === 'failed' ? 'PERMISSION' : 'REMOTE_ERROR' });
+      expect(fs.readFileSync(filename, 'utf8')).toBe(original);
+      expect(browser.remotes.has('old')).toBe(true);
+    });
+    test('preserves concurrent external changes instead of publishing deletion', async () => {
+      replies.push(async (args, options) => {
+        fs.writeFileSync(options.env.RCLONE_CONFIG, '[other]\ntype = local\n');
+        fs.appendFileSync(filename, '\n[external]\ntype = local\n');
+        return done;
+      });
+      await expect(config.configure({ mode: 'remove', name: 'old' })).rejects.toMatchObject({ code: 'CONFIG_CONFLICT' });
+      expect(fs.readFileSync(filename, 'utf8')).toBe(original + '\n[external]\ntype = local\n');
+    });
+    test('cancellation before publication preserves original and clears staging', async () => {
+      let release, reached;
+      const started = new Promise(resolve => { reached = resolve; });
+      replies.push(async (args, options) => {
+        fs.writeFileSync(options.env.RCLONE_CONFIG, '[other]\ntype = local\n');
+        reached();
+        await new Promise(resolve => { release = resolve; });
+        return done;
+      });
+      const removal = config.configure({ mode: 'remove', name: 'old' });
+      await started;
+      const cancelled = config.cancel();
+      release();
+      await expect(removal).rejects.toMatchObject({ code: 'CANCELLED' });
+      await cancelled;
+      expect(fs.readFileSync(filename, 'utf8')).toBe(original);
+      expect(fs.readdirSync(temp)).toEqual(['rclone.conf']);
+    });
+    test.each(['symlink', 'encrypted', 'readonly'])('does not edit %s configuration', async kind => {
+      if (kind === 'symlink') { const target = path.join(temp, 'target'); fs.renameSync(filename, target); fs.symlinkSync(target, filename); }
+      if (kind === 'encrypted') fs.writeFileSync(filename, 'RCLONE_ENCRYPT_V0:\nprivate-secret');
+      if (kind === 'readonly') fs.chmodSync(filename, 0o400);
+      const before = fs.readFileSync(filename);
+      await expect(config.configure({ mode: 'remove', name: 'old' })).rejects.toMatchObject({ code: 'CONFIG_LOCKED' });
+      expect(fs.readFileSync(filename)).toEqual(before);
+    });
   });
 });
