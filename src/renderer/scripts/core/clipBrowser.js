@@ -4,7 +4,7 @@ import { isReadOnlyRclonePath } from '../features/rcloneBrowser.js';
  * Handles clip list rendering, selection, and display item building.
  */
 
-import { escapeHtml, cssEscape, filePathToUrl } from '../lib/utils.js';
+import { escapeHtml, cssEscape, filePathToUrl, isRcloneStreamUrl } from '../lib/utils.js';
 import { formatEventTime } from '../ui/clipListHelpers.js';
 import { t } from '../lib/i18n.js';
 import { notify } from '../ui/notifications.js';
@@ -510,6 +510,8 @@ function attachThumbPreview(item, folderPath) {
         // Check cache first
         if (thumbExistsCache.has(thumbPath)) {
             if (!thumbExistsCache.get(thumbPath)) return; // known missing
+        } else if (isRcloneStreamUrl(thumbPath)) {
+            // The managed gateway checks its manifest allowlist; never send HTTP to filesystem IPC.
         } else if (window.electronAPI?.exists) {
             const exists = await window.electronAPI.exists(thumbPath);
             thumbExistsCache.set(thumbPath, exists);

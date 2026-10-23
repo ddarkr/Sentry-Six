@@ -14,6 +14,7 @@ function fakeCli(replies) {
     const finish = code => { if (closed) return; closed = true; child.stdout.end(); child.stderr.end(); setImmediate(() => child.emit('close', code)); };
     child.kill = jest.fn(() => finish(1));
     process.nextTick(() => {
+      if (args[0] === 'serve') { child.stderr.write('Serving on http://127.0.0.1:49123/\n'); return; }
       const next = replies.shift();
       const reply = typeof next === 'function' ? next(args) : next;
       for (const chunk of reply?.stderr || []) child.stderr.write(chunk);
@@ -46,36 +47,56 @@ describe('read-only remote browser', () => {
     expect(safeName('My folder $(echo hi);')).toBe(true);
     expect(validatePath('TeslaCam/SavedClips')).toBe('TeslaCam/SavedClips');
   });
-  test('downloads snapshot with original basename for local seek/export and no remote writes', async () => {
-    const [b, spawn] = browser([localRemote, JSON.stringify([entry(filename), entry('ignored.txt'), entry('ignored.txt'), entry('../ignored')]), 'mp4!']);
-    await b.listRemotes(); const result = await b.materialize('cloud', '');
-    expect(fs.readFileSync(path.join(result.directory, filename), 'utf8')).toBe('mp4!');
+  test('opens a manifest larger than 2 GiB without transferring recordings', async () => {
+    const [b, spawn] = browser([localRemote, JSON.stringify([entry(filename, 3 * 1024 ** 3), entry('ignored.txt')])]);
+    await b.listRemotes();
+    const result = await b.open('cloud', '');
+    expect(result.files).toEqual([{ name: filename, path: `${result.directory}/${filename}`, size: 3 * 1024 ** 3, isFile: true, isDirectory: false }]);
     expect(result.source).toEqual({ kind: 'rclone', remote: 'cloud', folder: '' });
-    for (const call of spawn.mock.calls) expect(call[2].shell).toBe(false);
-    const root = b.root; b.dispose(); expect(fs.existsSync(root)).toBe(false);
+    expect(b.isStreamPath(result.files[0].path)).toBe(true);
+    expect(b.containsCachePath(result.directory)).toBe(true);
+    expect(spawn.mock.calls.map(call => call[1][0])).toEqual(['listremotes', 'lsjson', 'serve']);
+    await expect(b.stageForExport([result.files[0].path])).rejects.toMatchObject({ code: 'EXPORT_LIMIT' });
+    const old = b.stream; b.cancel(true); expect(old.closed).toBe(true);
+    await expect(b.stageForExport([result.files[0].path])).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
-  test('quota checks before downloading, preserves earlier playable cache', async () => {
-    const [b, spawn] = browser([localRemote, JSON.stringify([entry(filename)]), 'mp4!', JSON.stringify([entry(filename)])], { maxBytes: 6 });
-    await b.listRemotes(); const first = await b.materialize('cloud', '');
-    await expect(b.materialize('cloud', '')).rejects.toThrow('limit');
-    expect(spawn.mock.calls.filter(c => c[1][0] === 'cat')).toHaveLength(1);
-    expect(fs.existsSync(path.join(first.directory, filename))).toBe(true);
-  });
-  test.each(['too much data', 'x'])('cleans incomplete or oversized transfers', async data => {
-    const [b] = browser([localRemote, JSON.stringify([entry(filename)]), data]);
-    await b.listRemotes(); await expect(b.materialize('cloud', '')).rejects.toThrow('changed size');
-    expect(fs.readdirSync(b.root)).toEqual([]); expect(b.bytes).toBe(0);
-  });
-  test.each([filename, filename.toUpperCase()])('rejects conflicting recording %s only at download', async duplicate => {
+  test.each([filename, filename.toUpperCase()])('rejects conflicting recording %s only at open', async duplicate => {
     const listing = JSON.stringify([entry(filename), entry(duplicate)]);
     const [b, spawn] = browser([localRemote, listing, listing]);
     await b.listRemotes();
     expect((await b.list('cloud', '')).map(row => row.name)).toEqual([filename, duplicate]);
-    await expect(b.materialize('cloud', '')).rejects.toMatchObject({ code: 'DUPLICATE_FILES' });
+    await expect(b.open('cloud', '')).rejects.toMatchObject({ code: 'DUPLICATE_FILES' });
     expect(spawn.mock.calls.some(call => call[1][0] === 'cat')).toBe(false);
     expect(b.root).toBeUndefined();
   });
-  test('same-name Drive directories select and download from their own IDs', async () => {
+  test('streams one copy of identical Drive recordings and event assets', async () => {
+    const hashed = name => ({ ...entry(name), Hashes: { md5: 'ab'.repeat(16) } });
+    const listing = [hashed(filename), hashed(filename), hashed(filename.toUpperCase()),
+      hashed('event.json'), hashed('event.json'), hashed('thumb.png'), hashed('thumb.png')];
+    listing[1].Hashes.md5 = listing[1].Hashes.md5.toUpperCase();
+    const [b] = browser([JSON.stringify([{ name: 'cloud', type: 'drive' }]), JSON.stringify(listing)]);
+    await b.listRemotes();
+    const result = await b.open('cloud', '');
+    expect(result.fileCount).toBe(1);
+    expect(result.files.map(file => file.name)).toEqual([filename, 'event.json', 'thumb.png']);
+    expect(b.stream.files.size).toBe(3);
+  });
+  test.each([
+    ['different content', 'cd'.repeat(16), 4],
+    ['different size', 'ab'.repeat(16), 5],
+    ['missing hash', undefined, 4],
+    ['empty hash', '', 4],
+    ['invalid hash', 'not-a-checksum', 4]
+  ])('rejects unverified Drive duplicates: %s', async (_reason, md5, size) => {
+    const original = { ...entry(filename), Hashes: { md5: 'ab'.repeat(16) } };
+    const duplicate = { ...entry(filename, size), Hashes: { md5 } };
+    const [b] = browser([JSON.stringify([{ name: 'cloud', type: 'drive' }]),
+      JSON.stringify([original, original, duplicate])]);
+    await b.listRemotes();
+    await expect(b.open('cloud', '')).rejects.toMatchObject({ code: 'DUPLICATE_FILES' });
+    expect(b.stream).toBeUndefined();
+  });
+  test('same-name Drive directories select and serve from their own IDs', async () => {
     const directories = [
       { ...entry('Same / folder:', 0, true), ID: 'folder-a' },
       { ...entry('Same / folder:', 0, true), ID: 'folder-b' }
@@ -84,15 +105,15 @@ describe('read-only remote browser', () => {
       JSON.stringify([{ name: 'cloud', type: 'drive' }]),
       JSON.stringify(directories),
       args => JSON.stringify([entry(args.includes('folder-a') ? 'first.txt' : 'wrong.txt')]),
-      args => JSON.stringify([entry(args.includes('folder-b') ? filename : 'wrong.txt')]),
-      args => args.includes('folder-b') ? 'mp4!' : 'oops'
+      args => JSON.stringify([entry(args.includes('folder-b') ? filename : 'wrong.txt')])
     ]);
     await b.listRemotes();
     const folders = await b.list('cloud', '');
     expect(folders[0].folder).not.toBe(folders[1].folder);
     expect((await b.list('cloud', folders[0].folder))[0].name).toBe('first.txt');
-    const opened = await b.materialize('cloud', folders[1].folder);
-    expect(fs.readFileSync(path.join(opened.directory, filename), 'utf8')).toBe('mp4!');
+    const opened = await b.open('cloud', folders[1].folder);
+    expect(opened.files[0].name).toBe(filename);
+    expect(b.sourceArgs('cloud', folders[1].folder)).toEqual(['--drive-root-folder-id', 'folder-b', '--', 'cloud:']);
     expect(opened.source.folder).toBe('Same / folder:');
   });
   test('Drive directory shortcuts use target IDs, not ambiguous names', async () => {
@@ -112,7 +133,7 @@ describe('read-only remote browser', () => {
     const [folder] = await b.list('cloud', '');
     await expect(b.list('cloud', 'folder-id')).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     await expect(b.list('other', folder.folder)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
-    await expect(b.materialize('other', folder.folder)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(b.open('other', folder.folder)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     await b.listRemotes();
     await expect(b.list('cloud', folder.folder)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     expect(spawn).toHaveBeenCalledTimes(3);
@@ -161,6 +182,38 @@ describe('read-only remote browser', () => {
     b.cancel(); await expect(operation).rejects.toMatchObject({ code: 'CANCELLED' });
     expect(b.children.size).toBe(0);
   });
+  test.each([false, true])('cancelling a pending listing releases the active source only when requested: %s', async release => {
+    const [b, spawn] = browser([localRemote, JSON.stringify([entry(filename)]), { hold: true }]);
+    await b.listRemotes();
+    const source = await b.open('cloud', '');
+    const old = b.stream;
+    const servingChild = spawn.mock.results.at(-1).value;
+    const operation = b.list('cloud', '');
+    b.cancel(release);
+    await expect(operation).rejects.toMatchObject({ code: 'CANCELLED' });
+    expect(old.closed).toBe(release);
+    expect(servingChild.kill).toHaveBeenCalledTimes(release ? 1 : 0);
+    expect(b.children.size).toBe(0);
+    if (release) await expect(fetch(source.files[0].path)).rejects.toThrow();
+    else {
+      b.cancel();
+      expect(old.closed).toBe(false);
+      b.dispose();
+      expect(old.closed).toBe(true);
+    }
+  });
+  test('cancelling a pending source open preserves the previous source', async () => {
+    const [b] = browser([localRemote, JSON.stringify([entry(filename)]), { hold: true }]);
+    await b.listRemotes();
+    await b.open('cloud', '');
+    const old = b.stream;
+    const operation = b.open('cloud', '');
+    b.cancel();
+    await expect(operation).rejects.toMatchObject({ code: 'CANCELLED' });
+    expect(b.stream).toBe(old);
+    expect(old.closed).toBe(false);
+    expect(b.children.size).toBe(0);
+  });
   test('timeouts stop stalled CLI', async () => {
     const [b] = browser([{ hold: true }], { timeoutMs: 10 });
     await expect(b.listRemotes()).rejects.toMatchObject({ code: 'TIMEOUT' });
@@ -193,13 +246,23 @@ describe('read-only remote browser', () => {
     const result = await handlers['rclone:remotes']({ sender: webContents, senderFrame: frame });
     expect(result).toMatchObject({ ok: false, error: { code: 'AUTH_REQUIRED' } });
     expect(JSON.stringify(result)).not.toContain('private-token');
+    const cancel = jest.spyOn(b, 'cancel');
+    const event = { sender: webContents, senderFrame: frame };
+    for (const value of [null, 1, 'true', {}]) {
+      expect(await handlers['rclone:cancel'](event, value)).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    }
+    expect(cancel).not.toHaveBeenCalled();
+    for (const value of [undefined, false, true]) {
+      expect(await handlers['rclone:cancel'](event, value)).toMatchObject({ ok: true });
+      expect(cancel).toHaveBeenLastCalledWith(value ?? false);
+    }
   });
 });
 
 describe('installed rclone local fixture (no user cloud credentials)', () => {
   const { spawn, spawnSync } = require('child_process');
   const hasRclone = !spawnSync('rclone', ['version'], { stdio: 'ignore' }).error;
-  (hasRclone ? test : test.skip)('lists, downloads and preserves TeslaCam event layout using real CLI', async () => {
+  (hasRclone ? test : test.skip)('streams and stages selected TeslaCam files using real CLI', async () => {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'rclone-local-fixture-'));
     const config = path.join(temp, 'fixture.conf');
     fs.writeFileSync(config, '[fixture]\ntype = local\n');
@@ -208,21 +271,30 @@ describe('installed rclone local fixture (no user cloud credentials)', () => {
     fs.writeFileSync(path.join(source, filename), 'fake-video');
     fs.writeFileSync(path.join(source, 'event.json'), '{"reason":"sentry_aware_object_detection"}');
     const b = new RcloneBrowser({ cacheParent: temp, spawnProcess: (exe, args, options) => spawn(exe, ['--config', config, ...args], {
-      ...options, env: { PATH: process.env.PATH, HOME: temp, SYSTEMROOT: process.env.SYSTEMROOT }
+      ...options, env: { ...options.env, PATH: process.env.PATH, HOME: temp, SYSTEMROOT: process.env.SYSTEMROOT }
     }) });
     // A local backend uses an absolute fixture path. This test maps a safe relative path
     // through cwd rather than weakening production's remote path validation.
     b.spawn = (exe, args, options) => spawn(exe, ['--config', config, ...args], {
-      ...options, cwd: path.join(temp, 'source'), env: { PATH: process.env.PATH, HOME: temp, SYSTEMROOT: process.env.SYSTEMROOT }
+      ...options, cwd: path.join(temp, 'source'), env: { ...options.env, PATH: process.env.PATH, HOME: temp, SYSTEMROOT: process.env.SYSTEMROOT }
     });
     try {
       expect(await b.listRemotes()).toEqual(['fixture']);
       const [category] = await b.list('fixture', '');
       const [event] = await b.list('fixture', category.folder);
-      const result = await b.materialize('fixture', event.folder);
-      const cacheEvent = path.join(result.directory, 'SentryClips', '2026-10-09_12-30-00');
-      expect(fs.readFileSync(path.join(cacheEvent, filename), 'utf8')).toBe('fake-video');
-      expect(fs.existsSync(path.join(cacheEvent, 'event.json'))).toBe(true);
+      const result = await b.open('fixture', event.folder);
+      expect(result.source.folder).toBe('SentryClips/2026-10-09_12-30-00');
+      const url = result.files.find(file => file.name === filename).path;
+      const response = await fetch(url, { headers: { Range: 'bytes=2-5' } });
+      expect(response.status).toBe(206); expect(await response.text()).toBe('ke-v');
+      expect((await fetch(result.directory)).status).toBe(404);
+      expect((await fetch(url, { method: 'PUT' })).status).toBe(405);
+      expect((await fetch(url.replace(/sentry-rclone\/[a-f0-9]+/, `sentry-rclone/${'0'.repeat(64)}`))).status).toBe(404);
+      const staged = await b.stageForExport([url]);
+      expect(staged.paths.size).toBe(1);
+      expect(fs.readFileSync(staged.paths.get(url), 'utf8')).toBe('fake-video');
+      const stagedPath = staged.paths.get(url);
+      staged.cleanup(); staged.cleanup(); expect(fs.existsSync(stagedPath)).toBe(false);
       expect(fs.readdirSync(source).sort()).toEqual([filename, 'event.json'].sort());
     } finally { b.dispose(); fs.rmSync(temp, { recursive: true, force: true }); }
   });
@@ -230,18 +302,19 @@ describe('installed rclone local fixture (no user cloud credentials)', () => {
 
 const { spawn: spawnReal, spawnSync } = require('child_process');
 const mediaToolsAvailable = ['rclone', 'ffmpeg', 'ffprobe'].every(tool => !spawnSync(tool, tool === 'rclone' ? ['version'] : ['-version'], { stdio: 'ignore' }).error);
-(mediaToolsAvailable ? test : test.skip)('real local-backend MP4 snapshot supports seeking and FFmpeg export', async () => {
+(mediaToolsAvailable ? test : test.skip)('real local-backend MP4 staging supports seeking and FFmpeg export', async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'rclone-media-fixture-'));
   const source = path.join(temp, 'source'); fs.mkdirSync(source);
   const config = path.join(temp, 'fixture.conf'); fs.writeFileSync(config, '[fixture]\ntype = local\n');
   const generated = spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=64x64:r=10:d=2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', path.join(source, filename)]);
   expect(generated.status).toBe(0);
   const browser = new RcloneBrowser({ cacheParent: temp, spawnProcess: (exe, args, options) => spawnReal(exe, ['--config', config, ...args], {
-    ...options, cwd: source, env: { PATH: process.env.PATH, HOME: temp, SYSTEMROOT: process.env.SYSTEMROOT }
+    ...options, cwd: source, env: { ...options.env, PATH: process.env.PATH, HOME: temp, SYSTEMROOT: process.env.SYSTEMROOT }
   }) });
   try {
-    await browser.listRemotes(); const result = await browser.materialize('fixture', '');
-    const cached = path.join(result.directory, filename);
+    await browser.listRemotes(); const result = await browser.open('fixture', '');
+    const staged = await browser.stageForExport([result.files[0].path]);
+    const cached = staged.paths.get(result.files[0].path);
     const exported = path.join(temp, 'export.mp4');
     const encoded = spawnSync('ffmpeg', ['-v', 'error', '-ss', '0.5', '-i', cached, '-t', '0.75', '-c:v', 'libx264', exported]);
     expect(encoded.status).toBe(0);

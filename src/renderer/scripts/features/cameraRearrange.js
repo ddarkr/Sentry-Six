@@ -244,7 +244,8 @@ export function initCameraDragAndDrop() {
                 const wasPlaying = nativeVideo.playing;
                 const currentTime = nativeVideo.master?.currentTime || 0;
                 
-                loadNativeSegment?.(nativeVideo.currentSegmentIdx).then(() => {
+                loadNativeSegment?.(nativeVideo.currentSegmentIdx).then(loaded => {
+                    if (!loaded) return;
                     if (nativeVideo.master) {
                         nativeVideo.master.currentTime = currentTime;
                         syncMultiVideos?.(currentTime);

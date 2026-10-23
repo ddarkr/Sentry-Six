@@ -58,6 +58,7 @@ function setup() {
     document,
     window: { electronAPI: api },
     Set,
+    URL,
     Map,
     t,
     onLanguageChange: jest.fn(),
@@ -73,6 +74,8 @@ function setup() {
     .replaceAll('export async function ', 'async function ');
   vm.runInContext(settingsSource, context);
   context.unwrap = context.unwrapRcloneResponse;
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../../src/renderer/scripts/lib/utils.js'), 'utf8')
+    .replaceAll('export function ', 'function '), context);
 
   const source = fs.readFileSync(path.join(__dirname, '../../src/renderer/scripts/features/rcloneBrowser.js'), 'utf8')
     .replace(/^import\s+[\s\S]*?\s+from\s+['"][^'"]+['"];?\s*$/gm, '')
@@ -86,23 +89,83 @@ function setup() {
   };
   return { context, document, api, button, openSettingsModal, registerRcloneBrowserOpener, ...Object.fromEntries(Object.entries(ids).map(([name, id]) => [name, document.getElementById(id)])), onOpen };
 }
-test('browses and hands complete snapshot to local playback exactly once', async () => {
-  const ui = setup(); ui.api.rcloneOpen.mockResolvedValue({ ok: true, data: { directory: '/tmp/cache/snapshot', source: { remote: 'fixture', folder: '' } } });
+test('browses and hands the stream manifest to playback exactly once', async () => {
+  const ui = setup();
+  const directory = `http://127.0.0.1:12345/sentry-rclone/${'a'.repeat(64)}`;
+  const manifest = { directory, source: { remote: 'fixture', folder: 'RecentClips' },
+    files: [{ name: '2026-10-09_12-30-00-front.mp4', path: `${directory}/2026-10-09_12-30-00-front.mp4`, size: 4 }] };
+  ui.api.rcloneOpen.mockResolvedValue({ ok: true, data: manifest });
   ui.button.onclick(); await flush(); expect(ui.open.disabled).toBe(false);
   ui.open.onclick(); ui.open.onclick(); await flush();
   expect(ui.api.rcloneOpen).toHaveBeenCalledTimes(1); expect(ui.onOpen).toHaveBeenCalledTimes(1); expect(ui.dialog.open).toBe(false);
-  expect(ui.context.isReadOnlyRclonePath('/tmp/cache/snapshot/SentryClips/event')).toBe(true);
-  expect(ui.context.isReadOnlyRclonePath('/tmp/cache/snapshot')).toBe(true);
-  expect(ui.context.isReadOnlyRclonePath('\\tmp\\cache\\snapshot\\event')).toBe(true);
+  expect(ui.onOpen).toHaveBeenCalledWith(manifest);
+  expect(ui.context.isReadOnlyRclonePath(directory)).toBe(true);
+  expect(ui.context.isReadOnlyRclonePath(manifest.files[0].path)).toBe(true);
+  expect(ui.context.filePathToUrl(manifest.files[0].path)).toBe(manifest.files[0].path);
   expect(ui.context.isReadOnlyRclonePath(null)).toBe(false);
-  expect(ui.context.isReadOnlyRclonePath('/tmp/cache/snapshot-other')).toBe(false);
+  expect(ui.context.isReadOnlyRclonePath('/tmp/local')).toBe(false);
+});
+test('accepts only exact managed loopback URLs and preserves local escaping', () => {
+  const { context } = setup();
+  const root = `http://127.0.0.1:12345/sentry-rclone/${'a'.repeat(64)}`;
+  for (const path of [`${root}/clip.mp4?x=1`, `${root}/%2Fsecret`, `${root}/..`, `${root}/.`, `${root}/%2e%2e`, `${root}/bad%zz`,
+    `${root}/clip.mp4#fragment`, `${root}/%5Csecret`, `${root}/%00secret`,
+    root.replace('127.0.0.1', 'localhost') + '/clip.mp4', root.replace(':12345', ':99999') + '/clip.mp4']) {
+    expect(context.isRcloneStreamUrl(path)).toBe(false);
+  }
+  expect(context.filePathToUrl('/tmp/a #?.mp4')).toBe('file:///tmp/a%20%23%3F.mp4');
+});
+test('failed playback handoff cancels its stream and leaves retry available', async () => {
+  const ui = setup();
+  ui.api.rcloneOpen.mockResolvedValue({ ok: true, data: { directory: 'unused' } });
+  ui.onOpen.mockRejectedValueOnce(new Error('Unable to open recording'));
+  ui.button.onclick(); await flush(); ui.open.onclick(); await flush();
+  expect(ui.api.rcloneCancel).toHaveBeenCalledTimes(1);
+  expect(ui.api.rcloneCancel).toHaveBeenCalledWith(true);
+  expect(ui.dialog.open).toBe(true);
+  expect(ui.open.disabled).toBe(false);
+});
+test('dismissing an idle picker does not revoke the playing library stream', async () => {
+  const ui = setup();
+  ui.button.onclick(); await flush(); ui.close.onclick(); await flush();
+  expect(ui.dialog.open).toBe(false);
+  expect(ui.api.rcloneCancel).not.toHaveBeenCalled();
 });
 test('cancel prevents a late download from replacing current library', async () => {
   const ui = setup(); let resolve; ui.api.rcloneOpen.mockReturnValue(new Promise(r => { resolve = r; }));
   ui.button.onclick(); await flush(); ui.open.onclick(); ui.close.onclick();
   resolve({ ok: true, data: { directory: '/tmp/cache/snapshot' } }); await flush();
   expect(ui.onOpen).not.toHaveBeenCalled(); expect(ui.dialog.open).toBe(false); expect(ui.api.rcloneCancel).toHaveBeenCalledTimes(1);
+  expect(ui.api.rcloneCancel).toHaveBeenCalledWith();
   expect(ui.button.disabled).toBe(false);
+});
+test('picker cancellation preserves playback but failed source integration releases it', async () => {
+  const ui = setup();
+  let playingStream = 'current';
+  ui.api.rcloneCancel.mockImplementation(async (release = false) => {
+    if (release) playingStream = null;
+    return { ok: true, data: null };
+  });
+  ui.button.onclick(); await flush(); ui.close.onclick(); await flush();
+  expect(playingStream).toBe('current');
+
+  let resolveOpen;
+  ui.api.rcloneOpen.mockReturnValueOnce(new Promise(resolve => { resolveOpen = resolve; }));
+  ui.button.onclick(); await flush(); ui.open.onclick(); ui.close.onclick();
+  resolveOpen({ ok: false, error: { code: 'CANCELLED', message: 'Cancelled' } });
+  await flush();
+  expect(ui.api.rcloneCancel).toHaveBeenLastCalledWith();
+  expect(playingStream).toBe('current');
+  expect(ui.onOpen).not.toHaveBeenCalled();
+
+  ui.api.rcloneOpen.mockImplementationOnce(async () => {
+    playingStream = 'replacement';
+    return { ok: true, data: { directory: 'unused' } };
+  });
+  ui.onOpen.mockRejectedValueOnce(new Error('Unable to open recording'));
+  ui.button.onclick(); await flush(); ui.open.onclick(); await flush();
+  expect(ui.api.rcloneCancel).toHaveBeenLastCalledWith(true);
+  expect(playingStream).toBeNull();
 });
 test('late directory listing after Escape stays dismissed and retry works', async () => {
   const ui = setup(); let resolve; ui.api.rcloneList.mockReturnValueOnce(new Promise(r => { resolve = r; }));

@@ -6,7 +6,7 @@
 // (normalized custom positions for timestamp / dashboard / minimap).
 
 import { advancedEditorState, parseTileId } from './state.js';
-import { filePathToUrl } from '../../lib/utils.js';
+import { extractSeiFromEntry } from '../../core/seiExtractor.js';
 import { parseTimestampKeyToEpochMs } from '../../core/clipBrowser.js';
 import { translateMessage, showExportCompletePanel, openExportModal, setSimpleModalAeMode } from '../../features/exportVideo.js';
 import { notify } from '../notifications.js';
@@ -88,15 +88,15 @@ export async function runAdvancedExport() {
 
     // ----- 1. Time range from current playback window -----
     const totalSec = (nativeVideo.cumulativeStarts || []).slice(-1)[0] || 0;
-    const startSec = advancedEditorState.playback.startSec || 0;
-    const endSec   = advancedEditorState.playback.endSec || totalSec;
-    const startTimeMs = Math.round(startSec * 1000);
-    const endTimeMs   = Math.round(endSec   * 1000);
+    const startSec = advancedEditorState.playback.startSec ?? 0;
+    const endSec   = advancedEditorState.playback.endSec ?? totalSec;
+    let startTimeMs = Math.round(startSec * 1000);
+    let endTimeMs   = Math.round(endSec   * 1000);
 
     // ----- 2. Build segment list (validated BEFORE any state registration
     // or save dialog, so a bad clip can't leave isExporting stuck true) -----
     const groups = active.groups;
-    const cumStarts = nativeVideo.cumulativeStarts || [];
+    let cumStarts = nativeVideo.cumulativeStarts || [];
     const segments = [];
     for (let i = 0; i < groups.length; i++) {
         const group = groups[i];
@@ -150,6 +150,7 @@ export async function runAdvancedExport() {
     // must reset this state or all future exports stay locked out.
     const exportId = `ae_export_${Date.now()}`;
     exportStateRef.cancelled = false;
+    exportStateRef.abortController = new AbortController();
     exportStateRef.isExporting = true;
     exportStateRef.currentExportId = exportId;
 
@@ -160,6 +161,21 @@ export async function runAdvancedExport() {
     };
 
     try {
+        const range = await nativeVideo.ensureExportDurations?.(startSec, endSec, { signal: exportStateRef.abortController.signal });
+        if (range) {
+            startTimeMs = Math.round(range.startSec * 1000);
+            endTimeMs = Math.round(range.endSec * 1000);
+            advancedEditorState.playback.startSec = range.startSec;
+            advancedEditorState.playback.endSec = range.endSec;
+        }
+        if (exportStateRef.abortController.signal.aborted) throw new DOMException('Export cancelled', 'AbortError');
+        if (endTimeMs - startTimeMs < 100) throw new Error('Export range is too short — move the start and end markers apart.');
+        const updatedStarts = nativeVideo.cumulativeStarts || [];
+        for (let i = 0; i < segments.length; i++) {
+            segments[i].durationSec = nativeVideo.segmentDurations?.[i] || 60;
+            segments[i].startSec = updatedStarts[i] || 0;
+        }
+        cumStarts = nativeVideo.cumulativeStarts || [];
         // ----- 4. SEI extraction (only if dashboard or minimap requires it) -----
         let seiData = [];
         let mapPath = [];
@@ -382,11 +398,6 @@ async function extractSeiAndMapPath({ groups, cumStarts, nativeVideo, startTimeM
     const allSei = [];
     const allMap = [];
 
-    if (!window.DashcamMP4 || !window.DashcamHelpers) return { seiData: allSei, mapPath: allMap };
-    const DashcamMP4 = window.DashcamMP4;
-    let SeiMetadata;
-    try { ({ SeiMetadata } = await window.DashcamHelpers.initProtobuf()); }
-    catch { return { seiData: allSei, mapPath: allMap }; }
 
     const hasGps = (sei) => {
         const lat = sei?.latitude_deg;
@@ -419,25 +430,11 @@ async function extractSeiAndMapPath({ groups, cumStarts, nativeVideo, startTimeM
         if (r.progressText) r.progressText.textContent = `Extracting telemetry (${i + 1}/${groups.length})…`;
 
         try {
-            let buffer = null;
-            if (entry.file.isElectronFile && entry.file.path) {
-                const url = filePathToUrl(entry.file.path);
-                buffer = await (await fetch(url)).arrayBuffer();
-            } else if (entry.file instanceof File) {
-                buffer = await entry.file.arrayBuffer();
-            } else if (entry.file.path) {
-                const url = filePathToUrl(entry.file.path);
-                buffer = await (await fetch(url)).arrayBuffer();
-            }
-            if (!buffer) continue;
-
-            const mp4 = new DashcamMP4(buffer);
-            const frames = mp4.parseFrames(SeiMetadata);
-            for (const f of frames) {
-                if (!f.sei) continue;
-                allSei.push({ timestampMs: segStartMs + f.timestamp, sei: f.sei });
-                if (wantMinimap && hasGps(f.sei)) {
-                    allMap.push([f.sei.latitude_deg, f.sei.longitude_deg]);
+            const extracted = await extractSeiFromEntry(entry, null, { signal: exportStateRef.abortController?.signal });
+            for (const frame of extracted.seiData || []) {
+                allSei.push({ timestampMs: segStartMs + (frame.frameTimestampMs ?? frame.timestampMs), sei: frame.sei });
+                if (wantMinimap && hasGps(frame.sei)) {
+                    allMap.push([frame.sei.latitude_deg, frame.sei.longitude_deg]);
                 }
             }
         } catch (err) {

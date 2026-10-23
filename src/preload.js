@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   rcloneRemotes: () => ipcRenderer.invoke('rclone:remotes'),
   rcloneList: (remote, folder) => ipcRenderer.invoke('rclone:list', remote, folder),
   rcloneOpen: (remote, folder) => ipcRenderer.invoke('rclone:open', remote, folder),
-  rcloneCancel: () => ipcRenderer.invoke('rclone:cancel'),
+  rcloneCancel: (release = false) => ipcRenderer.invoke('rclone:cancel', release),
   rcloneStatus: () => ipcRenderer.invoke('rclone:status'),
   rcloneChooseExecutable: () => ipcRenderer.invoke('rclone:chooseExecutable'),
   rcloneCheck: remote => ipcRenderer.invoke('rclone:check', remote),

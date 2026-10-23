@@ -3,7 +3,8 @@
  * Extracts GPS and vehicle telemetry data from Tesla dashcam video files
  */
 
-import { filePathToUrl } from '../lib/utils.js';
+import { filePathToUrl, isRcloneStreamUrl } from '../lib/utils.js';
+import { extractRemoteFrames } from './remoteSei.js';
 
 /**
  * Check if SEI data contains valid GPS coordinates
@@ -43,7 +44,7 @@ async function extractSeiFromBuffer(buffer) {
     for (const frame of frames) {
         runningMs += frame.duration;
         if (frame.sei) {
-            seiData.push({ timestampMs: runningMs, sei: frame.sei });
+            seiData.push({ timestampMs: runningMs, frameTimestampMs: frame.timestamp, sei: frame.sei });
             if (hasValidGps(frame.sei)) {
                 const lat = Number(frame.sei.latitudeDeg ?? frame.sei.latitude_deg);
                 const lon = Number(frame.sei.longitudeDeg ?? frame.sei.longitude_deg);
@@ -90,7 +91,8 @@ function seiCacheKey(entry) {
  * @param {string} seiType - SEI type identifier
  * @returns {Promise<{seiData: Array, mapPath: Array}>}
  */
-export async function extractSeiFromEntry(entry, seiType) {
+export async function extractSeiFromEntry(entry, seiType, { signal } = {}) {
+    if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError');
     if (!entry) return { seiData: [], mapPath: [] };
 
     const cacheKey = seiCacheKey(entry);
@@ -104,14 +106,28 @@ export async function extractSeiFromEntry(entry, seiType) {
 
     let result = { seiData: [], mapPath: [] };
 
-    // If it's an Electron file with path, fetch via file:// protocol
-    if (entry.file?.isElectronFile && entry.file?.path) {
+    if (isRcloneStreamUrl(entry.file?.path)) {
+        if (!window.DashcamMP4 || !window.DashcamHelpers) throw new Error('Telemetry parser unavailable');
+        const { SeiMetadata } = await window.DashcamHelpers.initProtobuf();
+        const seiData = await extractRemoteFrames(entry.file.path, SeiMetadata, signal);
+        const mapPath = seiData.filter(({ sei }) => hasValidGps(sei)).map(({ timestampMs, sei }) => {
+            const apState = sei.autopilotState ?? sei.autopilot_state;
+            return {
+                lat: Number(sei.latitudeDeg ?? sei.latitude_deg),
+                lon: Number(sei.longitudeDeg ?? sei.longitude_deg),
+                timestampMs,
+                autopilot: apState != null && apState !== 0 && apState !== 'DISABLED'
+            };
+        });
+        result = { seiData, mapPath };
+    } else if (entry.file?.isElectronFile && entry.file?.path) {
         try {
             const fileUrl = filePathToUrl(entry.file.path);
-            const response = await fetch(fileUrl);
+            const response = await fetch(fileUrl, { signal });
             const buffer = await response.arrayBuffer();
             result = await extractSeiFromBuffer(buffer);
         } catch (err) {
+            if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError');
             console.warn('Failed to extract SEI from Electron file:', err);
             return { seiData: [], mapPath: [] }; // don't cache transient read failures
         }
@@ -120,6 +136,7 @@ export async function extractSeiFromEntry(entry, seiType) {
         result = await extractSeiFromFile(entry.file);
     }
 
+    if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError');
     if (cacheKey) {
         seiCache.set(cacheKey, result);
         if (seiCache.size > SEI_CACHE_MAX) {

@@ -8,6 +8,7 @@
 import { advancedEditorState } from './state.js';
 import { filePathToUrl } from '../../lib/utils.js';
 import { extractSeiFromEntry } from '../../core/seiExtractor.js';
+import { isRcloneStreamUrl } from '../../lib/utils.js';
 
 const DRIFT_THRESHOLD_SEC = 0.15;
 let depsRef = null;
@@ -16,6 +17,7 @@ let segments = [];           // [{ index, files: {camera: url}, duration }]
 let cumStarts = [];          // length = segments.length + 1
 let totalSec = 0;
 let currentSegIdx = -1;
+let seiAbortController = null;
 let masterCamera = null;
 // Per-segment clock master: the preferred master (front) can be missing from
 // individual segments (camera dropout, deleted file) — the playback clock
@@ -43,6 +45,19 @@ export async function loadVideosForCanvas({ cameras, startSec, endSec }) {
 
     const groups = active.groups || [];
     if (groups.length === 0) return;
+    const durationController = new AbortController();
+    seiAbortController = durationController;
+    try {
+        const range = await nativeVideo.ensureExportDurations?.(startSec ?? 0, endSec ?? nativeVideo.cumulativeStarts?.at(-1) ?? groups.length * 60, { signal: durationController.signal });
+        if (range) {
+            startSec = range.startSec;
+            endSec = range.endSec;
+        }
+    } catch (err) {
+        if (durationController.signal.aborted) return;
+        throw err;
+    }
+    if (durationController.signal.aborted) return;
 
     // Build per-segment URL map keyed by camera.
     segments = [];
@@ -71,10 +86,11 @@ export async function loadVideosForCanvas({ cameras, startSec, endSec }) {
     }
     totalSec = cumStarts[cumStarts.length - 1] || 60;
 
-    // Clamp playback range.
+    // Keep the source-relative range returned by duration refinement, even if
+    // shortening a source collapses the selection; never invent extra frames.
     advancedEditorState.playback.startSec = Math.max(0, Math.min(startSec ?? 0, totalSec));
     advancedEditorState.playback.endSec = Math.max(
-        advancedEditorState.playback.startSec + 0.1,
+        advancedEditorState.playback.startSec,
         Math.min(endSec ?? totalSec, totalSec)
     );
     advancedEditorState.playback.currentSec = advancedEditorState.playback.startSec;
@@ -132,6 +148,8 @@ export async function loadVideosForCanvas({ cameras, startSec, endSec }) {
 }
 
 export function disposeVideos() {
+    seiAbortController?.abort();
+    seiAbortController = null;
     pause();
     if (advancedEditorState.playback.rafId) {
         cancelAnimationFrame(advancedEditorState.playback.rafId);
@@ -157,6 +175,9 @@ export function disposeVideos() {
 
 async function extractSeiForSegmentsInRange(groups, priorityIdx) {
     advancedEditorState.aeSeiBySegment.clear();
+    seiAbortController?.abort();
+    const controller = new AbortController();
+    seiAbortController = controller;
 
     // Determine which segments fall inside the AE export range; we don't waste
     // time extracting segments the user can't scrub to.
@@ -177,13 +198,16 @@ async function extractSeiForSegmentsInRange(groups, priorityIdx) {
     ].filter(i => groups[i]);
 
     for (const i of order) {
+        if (controller.signal.aborted) return;
         const group = groups[i];
+        if (i !== priorityIdx && [...(group.filesByCamera?.values() || [])].some(entry => isRcloneStreamUrl(entry.file?.path))) continue;
         const masterCam = masterCamera || 'front';
         const entry = group.filesByCamera?.get(masterCam)
             || group.filesByCamera?.values().next().value;
         if (!entry) continue;
         try {
-            const { seiData } = await extractSeiFromEntry(entry, null);
+            const { seiData } = await extractSeiFromEntry(entry, null, { signal: controller.signal });
+            if (controller.signal.aborted) return;
             if (Array.isArray(seiData) && seiData.length > 0) {
                 advancedEditorState.aeSeiBySegment.set(i, seiData);
                 // If this segment is the one the playhead is on, fire an
@@ -195,6 +219,7 @@ async function extractSeiForSegmentsInRange(groups, priorityIdx) {
                 if (i === curSeg && onTickCb) onTickCb(cur);
             }
         } catch (err) {
+            if (controller.signal.aborted) return;
             console.warn('[AE] SEI extract failed for segment', i, err);
         }
     }
@@ -303,6 +328,10 @@ async function loadSegment(segIdx) {
     const seg = segments[segIdx];
     if (!seg) return;
     activeMasterCamera = pickActiveMaster(segIdx);
+    const groups = depsRef?.getState?.()?.collection?.active?.groups || [];
+    if (!advancedEditorState.aeSeiBySegment.has(segIdx) && [...(groups[segIdx]?.filesByCamera?.values() || [])].some(entry => isRcloneStreamUrl(entry.file?.path))) {
+        extractSeiForSegmentsInRange(groups, segIdx).catch(() => {});
+    }
     const promises = [];
     for (const [camera, vid] of advancedEditorState.videoElements.entries()) {
         const url = seg.files[camera];

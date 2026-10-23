@@ -531,6 +531,10 @@
             <div class="timeline-container">
                 <div id="timelineMarkers" class="timeline-markers"></div>
                 <input type="range" id="progressBar" class="progress-bar" min="0" max="100" value="0" disabled>
+                <div id="playbackBufferStatus" class="playback-buffer-status" hidden>
+                    <span id="playbackBufferState" role="status" aria-live="polite" aria-atomic="true"></span>
+                    <span id="playbackBufferDetail"></span>
+                </div>
             </div>
 
             <!-- Export controls - right of timeline -->

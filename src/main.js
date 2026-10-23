@@ -117,6 +117,7 @@ function getUpdateBranch() {
 
 // Active exports tracking
 const activeExports = {};
+const exportAbortControllers = new Map();
 const activeExportPaths = {}; // Track output paths for cleanup on cancel
 const cancelledExports = new Set(); // Track cancelled exports by ID
 let mainWindow = null;
@@ -289,6 +290,9 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
   console.log(`[EXPORT] Received exportData - includeMinimap: ${includeMinimap}, mapPath.length: ${mapPath?.length || 0}, minimapPosition: ${minimapPosition}, minimapSize: ${minimapSize}, renderMode: ${minimapRenderMode}`);
 
   const tempFiles = [];
+  const abortController = new AbortController();
+  exportAbortControllers.set(exportId, abortController);
+  let stagedSources = null;
   const CAMERA_ORDER = ['left_pillar', 'front', 'right_pillar', 'left_repeater', 'back', 'right_repeater'];
   const FPS = 36; // Tesla cameras record at ~36fps
 
@@ -320,7 +324,11 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
     event.sender.send('export:progress', exportId, { type: 'complete', success, message, outputPath, warning });
   };
 
-  const cleanup = () => tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch { } });
+  const cleanup = () => {
+    tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch { } });
+    stagedSources?.cleanup();
+    exportAbortControllers.delete(exportId);
+  };
 
   // Minimap temp file path (set during pre-render)
   let minimapTempPath = null;
@@ -335,6 +343,7 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
   if (cancelledExports.has(exportId)) {
     console.log('Export cancelled before starting:', exportId);
     cancelledExports.delete(exportId);
+    cleanup();
     return Promise.reject(new Error('Export cancelled'));
   }
 
@@ -364,6 +373,31 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
 
     if (!relevantSegments.length) throw new Error('No segments found in export range');
     console.log(`[SEGMENTS] Found ${relevantSegments.length} segments for export`);
+    const remotePaths = new Set();
+    for (const segment of relevantSegments) {
+      for (const camera of selectedCameras) {
+        const source = segment.files?.[camera];
+        if (typeof source !== 'string') continue;
+        if (rcloneBrowser?.isStreamPath(source)) remotePaths.add(source);
+        else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(source)) {
+          throw new Error('Unrecognized remote export source');
+        }
+      }
+    }
+    if (remotePaths.size) {
+      stagedSources = await rcloneBrowser.stageForExport([...remotePaths], { signal: abortController.signal });
+      if (abortController.signal.aborted) throw new Error('Export cancelled');
+      for (const segment of relevantSegments) {
+        segment.files = { ...segment.files };
+        for (const camera of selectedCameras) {
+          const source = segment.files[camera];
+          if (!remotePaths.has(source)) continue;
+          const stagedPath = stagedSources.paths.get(source);
+          if (!stagedPath || !fs.existsSync(stagedPath)) throw new Error('Remote export source was not staged');
+          segment.files[camera] = stagedPath;
+        }
+      }
+    }
 
     // Start export timer - rendering begins now (dashboards, minimaps, blur zones, etc.)
     const exportStartTime = Date.now();
@@ -1727,7 +1761,7 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
     sendProgress(8, useGpu ? { key: 'ui.export.exportingWithEncoder', params: { encoder: activeEncoder.name } } : { key: 'ui.export.exportingWithCpu' });
 
     // Execute FFmpeg - no pipe needed since dashboard is pre-rendered to file
-    return new Promise((resolve, reject) => {
+    return await new Promise((resolve, reject) => {
       let retriedWithCpu = false;
 
       const startProc = () => {
@@ -1889,7 +1923,10 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
     console.error('Export error:', error);
     cancelledExports.delete(exportId); // Clean up cancellation flag
     cleanup();
+    if (abortController.signal.aborted) throw new Error('Export cancelled');
     throw error;
+  } finally {
+    cleanup();
   }
 }
 
@@ -1948,6 +1985,7 @@ app.on('window-all-closed', () => {
 // This prevents orphaned processes that can block the Windows installer
 app.on('before-quit', () => {
   console.log('[APP] before-quit: cleaning up active exports...');
+  for (const controller of exportAbortControllers.values()) controller.abort();
   const exportIds = Object.keys(activeExports);
   if (exportIds.length > 0) {
     console.log(`[APP] Killing ${exportIds.length} active FFmpeg process(es)`);
@@ -2130,6 +2168,7 @@ ipcMain.handle('export:start', async (event, exportId, exportData) => {
 ipcMain.handle('export:cancel', async (_event, exportId) => {
   // Mark as cancelled immediately so dashboard rendering loop can check it
   cancelledExports.add(exportId);
+  exportAbortControllers.get(exportId)?.abort();
 
   const proc = activeExports[exportId];
   if (proc) {

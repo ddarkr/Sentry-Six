@@ -3,8 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { createHash } = require('crypto');
-const { Transform } = require('stream');
-const { pipeline } = require('stream/promises');
+const streamTransport = require('./rcloneStream');
 const { pathToFileURL } = require('url');
 const { RcloneConfig } = require('./rcloneConfig');
 const ERROR_MESSAGES = {
@@ -13,7 +12,7 @@ const ERROR_MESSAGES = {
   INVALID_CLIENT: 'Check the Client ID and Client secret for your Google Cloud Desktop app.',
   NETWORK: 'The storage service could not be reached. Check the network connection.',
   RATE_LIMIT: 'The storage service is limiting requests. Wait a moment and try again; signing in again is not required.',
-  DUPLICATE_FILES: 'This folder contains recording or event files with conflicting names and cannot be downloaded safely.',
+  DUPLICATE_FILES: 'Same-name recording or event files could not be verified as identical and cannot be streamed safely.',
   PERMISSION: 'Access was denied. Check folder access and local configuration permissions.',
   CONFIG_LOCKED: 'The rclone configuration is locked or cannot be edited by this app.',
   CONFIG_CONFLICT: 'The rclone configuration changed during sign-in. Please try again.',
@@ -22,6 +21,7 @@ const ERROR_MESSAGES = {
   BUSY: 'A remote operation is already running. Cancel it or wait.',
   CANCELLED: 'Remote operation cancelled.',
   TIMEOUT: 'Remote operation timed out.',
+  EXPORT_LIMIT: 'Selected export exceeds the 2 GiB staging limit.',
   REMOTE_ERROR: 'rclone could not read this remote. Check connectivity, credentials, and folder access in rclone.'
 };
 function commandError(code) {
@@ -41,7 +41,7 @@ class RcloneBrowser {
   constructor({ cacheParent, spawnProcess = spawn, maxBytes = 2 * 1024 ** 3, timeoutMs = 600000, executable = 'rclone' }) {
     Object.assign(this, { cacheParent, spawn: spawnProcess, maxBytes, timeoutMs, executable });
     this.remotes = new Set(); this.remoteTypes = new Map(); this.folders = new Map();
-    this.children = new Set(); this.bytes = 0;
+    this.children = new Set(); this.stages = new Set(); this.stageDirectories = new Set();
   }
   async exclusive(fn) {
     if (this.closed) throw commandError('CANCELLED');
@@ -129,10 +129,11 @@ class RcloneBrowser {
       return [...this.remotes].sort();
     });
   }
-  async entries(remote, folder) {
+  async entries(remote, folder, includeHashes = false) {
     const context = this.folderContext(remote, folder);
     const drive = this.remoteTypes.get(remote) === 'drive';
-    const text = await this.text(['lsjson', '--low-level-retries', '5', '--max-depth', '1', ...this.sourceArgs(remote, folder)], { timeoutMs: 120000 });
+    // Drive supplies stored checksums; do not hash/download files on other backends.
+    const text = await this.text(['lsjson', '--low-level-retries', '5', '--max-depth', '1', ...(drive && includeHashes ? ['--hash-type', 'MD5'] : []), ...this.sourceArgs(remote, folder)], { timeoutMs: 120000 });
     let result;
     try { result = JSON.parse(text); } catch { throw new Error('rclone returned an invalid folder listing.'); }
     if (!Array.isArray(result) || result.length > 10000) throw new Error('Unsupported remote listing.');
@@ -147,6 +148,9 @@ class RcloneBrowser {
     return result.map(entry => {
       if (!entry || typeof entry.Name !== 'string' || !entry.Name || entry.Path !== entry.Name || typeof entry.IsDir !== 'boolean') throw commandError('REMOTE_ERROR');
       const result = { name: entry.Name, isDirectory: entry.IsDir, size: entry.Size, playable: !entry.IsDir && CLIP.test(entry.Name) };
+      if (drive && includeHashes && typeof entry.Hashes?.md5 === 'string' && /^[a-f0-9]{32}$/i.test(entry.Hashes.md5)) {
+        result.md5 = entry.Hashes.md5.toLowerCase();
+      }
       if (entry.IsDir) {
         if (drive ? typeof entry.ID !== 'string' || !/^[A-Za-z0-9_-]{1,256}(?:\t[A-Za-z0-9_-]{1,256})?$/.test(entry.ID) : !safeName(entry.Name)) throw commandError('UNSUPPORTED');
         // rclone represents shortcuts as target ID + tab + shortcut ID.
@@ -159,76 +163,58 @@ class RcloneBrowser {
     });
   }
   list(remote, folder) { return this.exclusive(() => this.entries(remote, folder)); }
-  materialize(remote, folder) {
+  open(remote, folder) {
     return this.exclusive(async () => {
-      const entries = await this.entries(remote, folder);
-      const files = entries.filter(e => e.playable || (!e.isDirectory && /^(event\.json|event\.png|thumb\.png)$/i.test(e.name)));
-      if (!files.some(e => e.playable)) throw new Error('Open a folder containing TeslaCam MP4 recordings first. Subfolders are not downloaded.');
-      const names = new Set();
-      for (const file of files) {
+      const entries = await this.entries(remote, folder, true);
+      const candidates = entries.filter(e => e.playable || (!e.isDirectory && /^(event\.json|event\.png|thumb\.png)$/i.test(e.name)));
+      if (!candidates.some(e => e.playable)) throw commandError('INVALID_INPUT');
+      const names = new Map(), files = [];
+      for (const file of candidates) {
         if (!safeName(file.name)) throw commandError('INVALID_INPUT');
+        if (!Number.isSafeInteger(file.size) || file.size < 0) throw commandError('REMOTE_ERROR');
+        if (!file.playable && file.size > (/\.json$/i.test(file.name) ? 1024 ** 2 : 16 * 1024 ** 2)) throw commandError('INVALID_INPUT');
         const key = file.name.toLowerCase();
-        if (names.has(key)) throw commandError('DUPLICATE_FILES');
-        names.add(key);
-      }
-      let total = 0;
-      for (const file of files) {
-        if (!Number.isSafeInteger(file.size) || file.size < 0) throw new Error('Remote did not provide a valid file size.');
-        if (!file.playable && file.size > (/\.json$/i.test(file.name) ? 1024 ** 2 : 16 * 1024 ** 2)) throw new Error('Remote event metadata is too large to open safely.');
-        total += file.size;
-      }
-      if (total > this.maxBytes - this.bytes) throw new Error('The 2 GiB session cache limit would be exceeded. Choose a smaller recording folder or restart the app.');
-      if (!this.root) {
-        this.root = await fs.promises.mkdtemp(path.join(this.cacheParent, 'sentry-rclone-'));
-        await fs.promises.chmod(this.root, 0o700);
-      }
-      const disk = await fs.promises.statfs(this.root);
-      if (disk.bavail * disk.bsize < total + 128 * 1024 ** 2) throw new Error('Not enough free disk space for this recording folder.');
-      if (this.cancelled || this.closed) throw new Error('Remote operation cancelled.');
-      const directory = await fs.promises.mkdtemp(path.join(this.root, 'recording-'));
-      try {
-        // Keep TeslaCam event structure so existing metadata/markers still attach.
-        const parts = this.folderContext(remote, folder).parts;
-        const eventId = parts.at(-1);
-        const category = /^(sentryclips|savedclips)$/i.test(parts.at(-2) || '')
-          ? (/^sentry/i.test(parts.at(-2)) ? 'SentryClips' : 'SavedClips') : null;
-        const downloadDirectory = category && /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/.test(eventId)
-          ? path.join(directory, category, eventId) : directory;
-        await fs.promises.mkdir(downloadDirectory, { recursive: true, mode: 0o700 });
-        for (const file of files) {
-          let received = 0;
-          const limiter = new Transform({ transform(chunk, encoding, callback) {
-            received += chunk.length;
-            callback(received > file.size ? new Error('Remote file changed size during download. Try again.') : null, chunk);
-          } });
-          const output = fs.createWriteStream(path.join(downloadDirectory, file.name), { flags: fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), mode: 0o600 });
-          const transfer = pipeline(limiter, output); transfer.catch(() => {});
-          try {
-            await this.command(['cat', '--max-depth', '1', ...this.sourceArgs(remote, folder, file.name)], async input => {
-              await pipeline(input, limiter); await transfer;
-            });
-            await transfer;
-          } catch (error) { limiter.destroy(); await transfer.catch(() => {}); throw error; }
-          if (received !== file.size) throw new Error('Remote file changed size during download. Try again.');
+        const previous = names.get(key);
+        if (previous) {
+          if (!file.md5 || file.md5 !== previous.md5 || file.size !== previous.size) throw commandError('DUPLICATE_FILES');
+          continue;
         }
-        if (this.cancelled || this.closed) throw new Error('Remote operation cancelled.');
-        this.bytes += total;
-        return { directory, source: { kind: 'rclone', remote, folder: parts.join('/') }, fileCount: files.filter(e => e.playable).length };
-      } catch (error) { await fs.promises.rm(directory, { recursive: true, force: true }); throw error; }
+        names.set(key, file);
+        files.push(file);
+      }
+      const session = await streamTransport.start(this, remote, folder, files);
+      this.stream?.close();
+      this.stream = session;
+      return {
+        directory: session.directory,
+        source: { kind: 'rclone', remote, folder: this.folderContext(remote, folder).parts.join('/') },
+        files: [...session.files].map(([url, file]) => ({ name: file.name, path: url, size: file.size, isFile: true, isDirectory: false })),
+        fileCount: files.filter(file => file.playable).length
+      };
     });
   }
-  cancel() { this.cancelled = true; for (const child of this.children) child.kill('SIGKILL'); }
+  isStreamPath(value) { return streamTransport.isStreamPath(value); }
+  stageForExport(paths, options) { return streamTransport.stage(this, paths, options); }
+  cancel(release = false) {
+    this.cancelled = true;
+    this.pendingStream?.close();
+    if (release || this.closed) this.stream?.close();
+    for (const child of this.children) child.kill('SIGKILL');
+  }
   containsCachePath(value) {
-    if (!this.root || typeof value !== 'string') return false;
+    if (this.isStreamPath(value)) return true;
+    if (typeof value !== 'string') return false;
     try {
-      const relative = path.relative(fs.realpathSync(this.root), fs.realpathSync(value));
-      return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+      const target = fs.realpathSync(value);
+      return [...this.stageDirectories].some(directory => {
+        const relative = path.relative(fs.realpathSync(directory), target);
+        return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+      });
     } catch { return false; }
   }
   cleanup() {
-    if (this.root) {
-      try { fs.rmSync(this.root, { recursive: true, force: true }); } catch { /* OS temp cleanup is a fallback if removal is denied. */ }
-    }
+    this.stream?.close();
+    for (const cleanup of [...this.stages]) cleanup();
   }
   dispose() {
     this.closed = true; this.cancel();
@@ -256,11 +242,15 @@ function registerRcloneIpc({ ipcMain, app, getMainWindow, executable = 'rclone' 
   };
   ipcMain.handle('rclone:remotes', invoke(() => browser.listRemotes(), true));
   ipcMain.handle('rclone:list', invoke((remote, folder) => browser.list(remote, folder), true));
-  ipcMain.handle('rclone:open', invoke((remote, folder) => browser.materialize(remote, folder), true));
-  ipcMain.handle('rclone:cancel', invoke(() => { if (!config.active) browser.cancel(); }));
+  ipcMain.handle('rclone:open', invoke((remote, folder) => browser.open(remote, folder), true));
+  ipcMain.handle('rclone:cancel', invoke((release = false) => {
+    if (typeof release !== 'boolean') throw commandError('INVALID_INPUT');
+    if (!config.active) browser.cancel(release);
+    else if (release) browser.stream?.close();
+  }));
   ipcMain.handle('rclone:status', invoke(() => config.status(), true));
   ipcMain.handle('rclone:check', invoke(remote => config.check(remote), true));
-  ipcMain.handle('rclone:configure', invoke(request => config.configure(request), true));
+  ipcMain.handle('rclone:configure', invoke(request => { browser.stream?.close(); return config.configure(request); }, true));
   ipcMain.handle('rclone:configContinue', invoke(request => config.continue(request)));
   ipcMain.handle('rclone:configCancel', invoke(() => config.cancel()));
   ipcMain.handle('rclone:chooseExecutable', invoke(async () => {
@@ -274,6 +264,7 @@ function registerRcloneIpc({ ipcMain, app, getMainWindow, executable = 'rclone' 
       const selected = result.filePaths[0];
       if (!(await fs.promises.stat(selected)).isFile()) throw commandError('INVALID_INPUT');
       await fs.promises.access(selected, process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK);
+      browser.stream?.close();
       browser.executable = selected;
       const status = await config.status();
       if (!status.installed) throw commandError('NOT_INSTALLED');

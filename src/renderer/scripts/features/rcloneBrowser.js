@@ -1,12 +1,10 @@
+import { isRcloneStreamUrl } from '../lib/utils.js';
 import { t, onLanguageChange } from '../lib/i18n.js';
 import { openSettingsModal, registerRcloneBrowserOpener } from '../ui/settingsModal.js';
 import { unwrapRcloneResponse as unwrap, getRcloneErrorMessage } from './rcloneSettings.js';
 
-const snapshotRoots = new Set();
 export function isReadOnlyRclonePath(value) {
-    if (typeof value !== 'string') return false;
-    const normalized = value.replace(/\\/g, '/');
-    return [...snapshotRoots].some(root => normalized === root || normalized.startsWith(`${root}/`));
+    return isRcloneStreamUrl(value) || isRcloneStreamUrl(`${value}/thumb.png`);
 }
 
 export function initRcloneBrowser(onOpen) {
@@ -71,6 +69,7 @@ export function initRcloneBrowser(onOpen) {
     let navStack = [], busy = false, generation = 0, hasClips = false, opening = false;
     let statusKey = 'chooseFolder', statusParams = {}, lastErrorCode = null, returnFocus = button;
     const currentFolder = () => navStack.length > 0 ? navStack[navStack.length - 1].folder : '';
+    let pendingOpen = false;
     function setStatus(key, state = '', params = {}) {
         statusKey = key; statusParams = params; lastErrorCode = null;
         status.textContent = t(`ui.rclone.${key}`, params);
@@ -246,19 +245,26 @@ export function initRcloneBrowser(onOpen) {
     open.onclick = () => {
         if (!hasClips || opening) return;
         run(async active => {
-            const result = await unwrap(api.rcloneOpen(select.value, currentFolder()));
+            pendingOpen = true;
+            let result;
+            try { result = await unwrap(api.rcloneOpen(select.value, currentFolder())); }
+            finally { pendingOpen = false; }
             if (!active()) return;
-            snapshotRoots.add(result.directory.replace(/\\/g, '/'));
             opening = true; controls(); setStatus('preparing', 'loading');
-            try { await onOpen(result); if (active()) dialog.close(); }
-            finally { opening = false; controls(); }
-        }, 'downloading');
+            try {
+                await onOpen(result);
+                if (active()) dialog.close();
+            } catch (error) {
+                await api.rcloneCancel?.(true);
+                throw error;
+            } finally { opening = false; controls(); }
+        }, 'openingStream');
     };
     async function cancel() {
         if (opening) return;
         ++generation; busy = false; dialog.close(); controls();
         try {
-            if (api.rcloneCancel) await api.rcloneCancel();
+            if (pendingOpen && api.rcloneCancel) await api.rcloneCancel();
         } catch (_) {}
     }
     close.onclick = headerClose.onclick = cancel;

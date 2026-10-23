@@ -2,7 +2,7 @@ import { initRcloneBrowser } from './scripts/features/rcloneBrowser.js';
 import { MULTI_LAYOUTS, DEFAULT_MULTI_LAYOUT } from './scripts/lib/multiLayouts.js';
 import { CLIPS_MODE_KEY, MULTI_LAYOUT_KEY, MULTI_ENABLED_KEY, SENTRY_CAMERA_HIGHLIGHT_KEY, SAVED_CAMERA_HIGHLIGHT_KEY } from './scripts/lib/storageKeys.js';
 import { createClipsPanelMode } from './scripts/ui/panelMode.js';
-import { filePathToUrl } from './scripts/lib/utils.js';
+import { filePathToUrl, isRcloneStreamUrl } from './scripts/lib/utils.js';
 import { state } from './scripts/lib/state.js';
 import { notify } from './scripts/ui/notifications.js';
 import { showLoading, updateLoading, hideLoading, yieldToUI } from './scripts/ui/loadingOverlay.js';
@@ -46,6 +46,7 @@ import {
 import { matchClipsTodrives } from './scripts/core/driveGrouper.js';
 import { initDriveBrowser, renderDriveList, setDriveTagFilter } from './scripts/core/driveBrowser.js';
 import { initI18n, t, onLanguageChange } from './scripts/lib/i18n.js';
+import { createPlaybackBuffering } from './scripts/ui/playbackBuffering.js';
 
 // State
 const player = state.player;
@@ -62,6 +63,10 @@ const eventMetaByKey = new Map(); // key -> parsed JSON object
 
 // DOM Elements
 const $ = id => document.getElementById(id);
+const playbackBuffering = createPlaybackBuffering({
+    root: $('playbackBufferStatus'), status: $('playbackBufferState'), detail: $('playbackBufferDetail'),
+    slider: $('progressBar'), t, cameraLabel
+});
 const dropOverlay = $('dropOverlay');
 const folderInput = $('folderInput');
 const overlayChooseFolderBtn = $('overlayChooseFolderBtn');
@@ -202,7 +207,11 @@ function resetDashboardElements() {
     resetCompass();
 }
 
+let activeTelemetryController = null;
+let activeLibraryController = null;
+
 function resetDashboardAndMap() {
+    activeTelemetryController?.abort();
     resetDashboardElements();
     
     // Reset map
@@ -387,6 +396,7 @@ let useMetric = false; // Will be loaded from settings
     
     // Listen for language changes and update dashboard labels
     onLanguageChange((lang) => {
+        playbackBuffering.render();
         console.log('Language changed to:', lang);
         
         // Update speed unit labels
@@ -1200,6 +1210,7 @@ function setMode(nextMode) {
 
     // Stop playback timers and prevent overlapping loops across transitions.
     pause();
+    playbackBuffering.reset();
 
     // Close transient UI.
     clearMultiFocus();
@@ -1233,7 +1244,8 @@ function setMultiLayout(layoutId) {
         const wasPlaying = nativeVideo.playing;
         const currentTime = nativeVideo.master?.currentTime || 0;
         
-        loadNativeSegment(segIdx).then(() => {
+        loadNativeSegment(segIdx).then(loaded => {
+            if (!loaded) return;
             // Restore playback position and state
             if (nativeVideo.master) {
                 nativeVideo.master.currentTime = currentTime;
@@ -1281,6 +1293,7 @@ function handleClipDeleted(collectionId, folderPath, unloadOnly = false) {
     // Clear current selection if it was the deleted clip
     if (state.collection?.active?.id === collectionId) {
         state.collection.active = null;
+        playbackBuffering.reset();
         pauseNative();
         resetDashboardAndMap();
         
@@ -2036,8 +2049,8 @@ async function openFolderPicker() {
     if ('showDirectoryPicker' in window) {
         try {
             showLoading('Opening folder...', 'Please select a dashcam folder');
-            baseFolderPath = null; // No actual path available
             const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+            baseFolderPath = null; // No actual path available
             await traverseDirectoryHandle(dirHandle);
         } catch (err) {
             hideLoading();
@@ -2054,6 +2067,12 @@ async function openFolderPicker() {
 
 // Traverse directory using Electron's fs APIs (provides actual file paths)
 async function traverseDirectoryElectron(dirPath) {
+    playbackBuffering.reset();
+    activeLibraryController?.abort();
+    activeTelemetryController?.abort();
+    if (library.clipGroups.some(group => [...group.filesByCamera.values()].some(entry => entry.file?.isRemote))) {
+        await window.electronAPI?.rcloneCancel?.(true);
+    }
     // Normalize path separators and extract folder name
     const normalizedPath = dirPath.replace(/\\/g, '/');
     const folderName = normalizedPath.split('/').pop();
@@ -2852,6 +2871,7 @@ function mergeIntoLibrary(built, date) {
 
     selection.selectedGroupId = null;
     state.collection.active = null;
+    playbackBuffering.reset();
     previews.cache.clear();
     previews.queue.length = 0;
     previews.inFlight = 0;
@@ -2977,6 +2997,14 @@ async function handleFolderFiles(fileList, directoryName = null) {
         notify(t('ui.notifications.metadataParserNotReady'), { type: 'warn' });
         return;
     }
+    activeTelemetryController?.abort();
+    playbackBuffering.reset();
+    if (![...fileList].some(file => file.isRemote)) {
+        activeLibraryController?.abort();
+        if (library.clipGroups.some(group => [...group.filesByCamera.values()].some(entry => entry.file?.isRemote))) {
+            await window.electronAPI?.rcloneCancel?.(true);
+        }
+    }
 
     // Show loading overlay immediately for large folders
     const totalRaw = fileList?.length ?? 0;
@@ -3056,6 +3084,7 @@ async function handleFolderFiles(fileList, directoryName = null) {
     // Reset selection + previews
     selection.selectedGroupId = null;
     state.collection.active = null;
+    playbackBuffering.reset();
     previews.cache.clear();
     previews.queue.length = 0;
     previews.inFlight = 0;
@@ -3137,6 +3166,7 @@ function selectSentryCollection(collectionId) {
     // Reset dashboard and map when switching clips (clears stale SEI data)
     resetDashboardAndMap();
     
+    playbackBuffering.reset();
     state.collection.active = {
         ...c,
         currentSegmentIdx: -1,
@@ -3190,6 +3220,7 @@ function selectDayCollection(dayKey) {
     nativeVideo.currentSegmentIdx = -1;
     nativeVideo.isTransitioning = false;
 
+    playbackBuffering.reset();
     state.collection.active = {
         ...coll,
         currentSegmentIdx: -1,
@@ -3268,7 +3299,8 @@ function selectDayCollection(dayKey) {
     // Probe actual segment durations in the background for accurate seek positioning
     // This runs concurrently with loading the first segment
     console.log('Starting duration probe for', groups.length, 'segments');
-    probeSegmentDurations(groups).then(probedDurations => {
+    const remoteCollection = groups.some(g => [...g.filesByCamera.values()].some(e => e.file?.isRemote));
+    (remoteCollection ? Promise.resolve(nativeVideo.segmentDurations) : probeSegmentDurations(groups)).then(probedDurations => {
         console.log('Duration probe completed:', probedDurations);
         if (!state.collection.active || state.collection.active.id !== coll.id) return; // Stale
         
@@ -3305,7 +3337,8 @@ function selectDayCollection(dayKey) {
         
         console.log('Loading directly at event segment', targetSegIdx, 'localOffset:', localOffset.toFixed(1) + 's');
         
-        loadNativeSegment(targetSegIdx).then(() => {
+        loadNativeSegment(targetSegIdx).then(loaded => {
+            if (!loaded) return;
             const totalSec = nativeVideo.cumulativeStarts[numSegs] || 60;
             updateTimeDisplayNew(Math.floor(startOffsetSec), Math.floor(totalSec));
             
@@ -3325,12 +3358,17 @@ function selectDayCollection(dayKey) {
             }
             
             if (autoplayToggle?.checked) {
-                setTimeout(() => playNative(), 100);
+                const request = nativeSegmentLoadRequest;
+                const collection = state.collection.active;
+                setTimeout(() => {
+                    if (request === nativeSegmentLoadRequest && state.collection.active === collection) playNative();
+                }, 100);
             }
         }).catch(err => {
             console.error('Failed to load event segment, falling back to segment 0:', err);
             // Fallback: load segment 0
-            loadNativeSegment(0).then(() => {
+            loadNativeSegment(0).then(loaded => {
+                if (!loaded) return;
                 playBtn.disabled = false;
                 progressBar.disabled = false;
             }).catch(e => {
@@ -3339,7 +3377,8 @@ function selectDayCollection(dayKey) {
         });
     } else {
         // No event anchor - load from the beginning
-        loadNativeSegment(0).then(() => {
+        loadNativeSegment(0).then(loaded => {
+            if (!loaded) return;
             const totalSec = nativeVideo.cumulativeStarts[numSegs] || 60;
             updateTimeDisplayNew(0, totalSec);
             
@@ -3347,7 +3386,11 @@ function selectDayCollection(dayKey) {
             progressBar.disabled = false;
             
             if (autoplayToggle?.checked) {
-                setTimeout(() => playNative(), 100);
+                const request = nativeSegmentLoadRequest;
+                const collection = state.collection.active;
+                setTimeout(() => {
+                    if (request === nativeSegmentLoadRequest && state.collection.active === collection) playNative();
+                }, 100);
             }
         }).catch(err => {
             console.error('Failed to load native segment:', err);
@@ -3383,15 +3426,21 @@ function updateCameraSelect(group) {
 
 async function ingestSentryEventJson(eventAssetsByKey) {
     if (!eventAssetsByKey || eventAssetsByKey.size === 0) return;
+    const groupsAtStart = library.clipGroups;
     // Read every event.json in parallel — sequential awaits cost one IPC
     // round-trip per event, which adds up fast on folders with many events.
     const reads = [];
     for (const [key, assets] of eventAssetsByKey.entries()) {
         if (!assets?.jsonFile) continue;
         // Handle both browser File objects and Electron path objects
-        const readPromise = (assets.jsonFile.isElectronFile && assets.jsonFile.path)
-            ? window.electronAPI.readFile(assets.jsonFile.path)
-            : assets.jsonFile.text();
+        const readPromise = assets.jsonFile.isRemote
+            ? fetch(assets.jsonFile.path, { signal: activeLibraryController?.signal }).then(response => {
+                if (!response.ok) throw new Error('Unable to read remote event metadata');
+                return response.text();
+            })
+            : (assets.jsonFile.isElectronFile && assets.jsonFile.path)
+                ? window.electronAPI.readFile(assets.jsonFile.path)
+                : assets.jsonFile.text();
         reads.push(readPromise.then(
             text => ({ key, text }),
             err => ({ key, err })
@@ -3399,6 +3448,7 @@ async function ingestSentryEventJson(eventAssetsByKey) {
     }
     let needsRender = false;
     for (const { key, text, err } of await Promise.all(reads)) {
+        if (library.clipGroups !== groupsAtStart) return;
         if (err) {
             console.warn(`Error reading event.json for ${key}:`, err);
             continue;
@@ -3972,7 +4022,7 @@ const nativeVideo = {
  * @param {Array} groups - Array of clip groups with filesByCamera maps
  * @returns {Promise<number[]>} - Array of segment durations in seconds
  */
-async function probeSegmentDurations(groups) {
+async function probeSegmentDurations(groups, { signal, strict = false } = {}) {
     if (!groups || groups.length === 0) return [];
     
     console.log('Probing durations for', groups.length, 'segments...');
@@ -3994,6 +4044,7 @@ async function probeSegmentDurations(groups) {
     
     // Probe each segment's duration using a temporary video element
     for (let i = 0; i < groups.length; i++) {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
         const group = groups[i];
         // Prefer front camera for duration, fall back to any available camera
         const entry = group.filesByCamera.get('front') || 
@@ -4013,6 +4064,8 @@ async function probeSegmentDurations(groups) {
                 tempVid.muted = true;
                 
                 const cleanup = () => {
+                    signal?.removeEventListener('abort', onAbort);
+                    tempVid.onloadedmetadata = tempVid.onerror = null;
                     tempVid.src = '';
                     tempVid.load();
                     if (urlData.isBlob) {
@@ -4024,12 +4077,19 @@ async function probeSegmentDurations(groups) {
                     cleanup();
                     reject(new Error('Timeout'));
                 }, 5000); // 5s timeout per segment
+                const onAbort = () => {
+                    clearTimeout(timeout);
+                    cleanup();
+                    reject(new DOMException('Aborted', 'AbortError'));
+                };
+                signal?.addEventListener('abort', onAbort, { once: true });
                 
                 tempVid.onloadedmetadata = () => {
                     clearTimeout(timeout);
                     const dur = tempVid.duration;
                     cleanup();
-                    resolve(Number.isFinite(dur) ? dur : 60);
+                    if (strict && (!Number.isFinite(dur) || dur <= 0)) reject(new Error('Invalid remote video duration'));
+                    else resolve(Number.isFinite(dur) && dur > 0 ? dur : 60);
                 };
                 
                 tempVid.onerror = () => {
@@ -4043,6 +4103,7 @@ async function probeSegmentDurations(groups) {
             
             durations.push(duration);
         } catch (err) {
+            if (strict || err?.name === 'AbortError') throw err;
             console.warn('Failed to probe segment', i, ':', err.message, '- using 60s estimate');
             durations.push(60);
         }
@@ -4051,6 +4112,43 @@ async function probeSegmentDurations(groups) {
     console.log('Probed durations:', durations.map(d => d.toFixed(1) + 's').join(', '));
     return durations;
 }
+
+nativeVideo.ensureExportDurations = async (startSec, endSec, { signal } = {}) => {
+    const collection = state.collection.active;
+    if (!collection) return { startSec, endSec };
+    const starts = [...nativeVideo.cumulativeStarts];
+    const last = collection.groups.length - 1;
+    // Anchor markers to their selected sources, not the estimated global timeline.
+    const anchor = (time, isEnd) => {
+        let index = starts.findIndex((_, i) => i <= last &&
+            (isEnd ? starts[i + 1] >= time : starts[i + 1] > time));
+        if (index < 0) index = last;
+        return { index, offset: Math.max(0, time - starts[index]),
+            atEnd: isEnd && time >= starts[index + 1] };
+    };
+    if (last < 0) return { startSec, endSec };
+    const start = anchor(startSec, false);
+    const end = anchor(endSec, true);
+    for (let i = start.index; i <= end.index; i++) {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        const group = collection.groups[i];
+        if (![...group.filesByCamera.values()].some(entry => entry.file?.isRemote)) continue;
+        const [duration] = await probeSegmentDurations([group], { signal, strict: true });
+        if (state.collection.active !== collection) throw new DOMException('Aborted', 'AbortError');
+        nativeVideo.segmentDurations[i] = duration;
+    }
+    let cumulative = 0;
+    nativeVideo.cumulativeStarts = nativeVideo.segmentDurations.map(duration => {
+        const start = cumulative;
+        cumulative += duration;
+        return start;
+    });
+    nativeVideo.cumulativeStarts.push(cumulative);
+    const resolve = marker => nativeVideo.cumulativeStarts[marker.index] +
+        (marker.atEnd ? nativeVideo.segmentDurations[marker.index] :
+            Math.min(marker.offset, nativeVideo.segmentDurations[marker.index]));
+    return { startSec: resolve(start), endSec: resolve(end) };
+};
 
 function initNativeVideoPlayback() {
     console.log('Initializing native video playback');
@@ -4201,7 +4299,7 @@ function onMasterLoaded() {
     const vid = nativeVideo.master || videoMain;
     if (!vid) return;
     
-    const actualDuration = vid.duration || 60;
+    const actualDuration = Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : 60;
     const segIdx = nativeVideo.currentSegmentIdx || 0;
     
     // Update segment duration with actual value
@@ -4249,12 +4347,16 @@ function onMasterEnded() {
             // The pause event fires before ended, so nativeVideo.playing is already false here
             // We ALWAYS want to continue playing when auto-advancing on ended
             
-            loadNativeSegment(nextSegIdx).then(() => {
+            const transitionRequest = nativeSegmentLoadRequest + 1;
+            loadNativeSegment(nextSegIdx, { transition: true }).then(loaded => {
+                if (transitionRequest !== nativeSegmentLoadRequest) return;
                 nativeVideo.isTransitioning = false;
+                if (!loaded) return;
                 // Always continue playing when auto-advancing (video only ends if it was playing)
                 console.log('Segment loaded, starting playback');
                 playNative();
             }).catch(err => {
+                if (transitionRequest !== nativeSegmentLoadRequest) return;
                 nativeVideo.isTransitioning = false;
                 console.error('Failed to load segment', nextSegIdx, '- skipping to next:', err);
                 // Skip to the next segment instead of stopping playback entirely
@@ -4278,14 +4380,25 @@ function onMasterEnded() {
     updatePlayButton();
 }
 
+let nativeSegmentLoadRequest = 0;
+
 // Load a segment using native video elements (fast, GPU-accelerated)
-async function loadNativeSegment(segIdx) {
-    if (!state.collection.active) return;
-    
-    const group = state.collection.active.groups?.[segIdx];
+async function loadNativeSegment(segIdx, { transition = false } = {}) {
+    const request = ++nativeSegmentLoadRequest;
+    playbackBuffering.reset();
+    // Every new load supersedes the previous transition's ownership.
+    nativeVideo.isTransitioning = transition;
+    activeTelemetryController?.abort();
+    activeTelemetryController = new AbortController();
+    const telemetrySignal = activeTelemetryController.signal;
+    const collection = state.collection.active;
+    const isCurrent = () => request === nativeSegmentLoadRequest &&
+        state.collection.active === collection && nativeVideo.currentSegmentIdx === segIdx;
+    if (!collection) return false;
+
+    const group = collection.groups?.[segIdx];
     if (!group) {
-        console.error('No group found for segment', segIdx);
-        return;
+        throw new Error(`No group found for segment ${segIdx}`);
     }
     
     console.log('Loading native segment', segIdx, 'group:', group.id, 'cameras:', Array.from(group.filesByCamera.keys()));
@@ -4334,6 +4447,7 @@ async function loadNativeSegment(segIdx) {
         
         return null;
     };
+    const bufferSources = [];
     
     if (multi.enabled) {
         // Load all cameras (use custom order if set)
@@ -4353,6 +4467,7 @@ async function loadNativeSegment(segIdx) {
             const urlData = getVideoUrl(entry);
             if (urlData) {
                 videoUrls.set(vid, urlData.url);
+                if (entry.file?.isRemote) bufferSources.push({ video: vid, src: urlData.url, camera });
                 vid.src = urlData.url;
                 vid.load();
                 console.log('Loaded', camera, 'into slot', slot, urlData.isBlob ? '(blob)' : '(file://)');
@@ -4391,11 +4506,13 @@ async function loadNativeSegment(segIdx) {
     } else {
         // Single camera
         const cam = selection.selectedCamera || 'front';
-        const entry = group.filesByCamera.get(cam) || group.filesByCamera.values().next().value;
+        const camera = group.filesByCamera.has(cam) ? cam : group.filesByCamera.keys().next().value;
+        const entry = group.filesByCamera.get(camera);
         
         const urlData = getVideoUrl(entry);
         if (urlData) {
             videoUrls.set(videoMain, urlData.url);
+            if (entry.file?.isRemote) bufferSources.push({ video: videoMain, src: urlData.url, camera });
             videoMain.src = urlData.url;
             videoMain.load();
             console.log('Loaded single camera', cam, urlData.isBlob ? '(blob)' : '(file://)');
@@ -4406,6 +4523,11 @@ async function loadNativeSegment(segIdx) {
         nativeVideo.master = videoMain;
         setMultiCamGridVisible(false);
     }
+    playbackBuffering.setSources(bufferSources, isCurrent, () => ({
+        offset: nativeVideo.cumulativeStarts[segIdx],
+        duration: nativeVideo.cumulativeStarts.at(-1),
+        segmentDuration: nativeVideo.segmentDurations[segIdx]
+    }));
     
     // Show dashboard and map panels
     dashboardVis.classList.add('visible');
@@ -4415,7 +4537,8 @@ async function loadNativeSegment(segIdx) {
     const masterCam = multi.masterCamera || 'front';
     const masterEntry = group.filesByCamera.get(masterCam) || group.filesByCamera.values().next().value;
     if (masterEntry && seiType) {
-        extractSeiFromEntry(masterEntry, seiType).then(({ seiData, mapPath }) => {
+        extractSeiFromEntry(masterEntry, seiType, { signal: telemetrySignal }).then(({ seiData, mapPath }) => {
+            if (!isCurrent()) return;
             nativeVideo.seiData = seiData;
             // If the active collection has a full drive route, use it for the map
             // polyline instead of the per-clip SEI path so the entire route is visible.
@@ -4505,16 +4628,15 @@ async function loadNativeSegment(segIdx) {
 
                 // Re-invalidate after layout settles so tiles render correctly
                 setTimeout(() => {
-                    if (map) map.invalidateSize();
+                    if (isCurrent() && map) map.invalidateSize();
                 }, 1000);
             }
-        }).catch(err => console.warn('SEI extraction failed:', err));
+        }).catch(err => { if (err?.name !== 'AbortError') console.warn('SEI extraction failed:', err); });
     }
     
     // Wait for master to be ready
     if (!nativeVideo.master) {
-        console.error('No master video element');
-        return;
+        throw new Error('No master video element');
     }
     
     console.log('Waiting for master video to load, current readyState:', nativeVideo.master.readyState, 'src:', nativeVideo.master.src?.substring(0, 60));
@@ -4543,8 +4665,12 @@ async function loadNativeSegment(segIdx) {
             resolved = true;
             cleanup();
             clearTimeout(timeout);
-            console.error('Video load error:', e);
-            reject(e);
+            if (isCurrent()) {
+                console.error('Video load error:', e);
+                reject(e);
+            } else {
+                resolve();
+            }
         };
         
         const timeout = setTimeout(() => {
@@ -4563,6 +4689,7 @@ async function loadNativeSegment(segIdx) {
         vid.addEventListener('canplay', onLoaded, { once: true });
         vid.addEventListener('error', onError, { once: true });
     });
+    if (!isCurrent()) return false;
     
     // Wait for ALL non-master multi-cam videos to also reach canplay
     // This prevents desync where master is ready but other cameras are still loading
@@ -4594,6 +4721,7 @@ async function loadNativeSegment(segIdx) {
             console.log('All cameras ready');
         }
     }
+    if (!isCurrent()) return false;
     
     // Reset ALL videos to start (ensure clean state after loading new segment)
     if (nativeVideo.master) {
@@ -4608,6 +4736,7 @@ async function loadNativeSegment(segIdx) {
     console.log('Segment', segIdx, 'loaded and ready to play');
     
     // Note: Playback is NOT auto-started here. Callers are responsible for calling playNative() if needed.
+    return true;
 }
 
 function playNative() {
@@ -4708,6 +4837,7 @@ function seekNative(pct) {
 // Seek to a position (in seconds) within the entire day collection using actual durations
 async function seekNativeDayCollectionBySec(targetSec) {
     if (!state.collection.active) return;
+    const collection = state.collection.active;
     
     const cumStarts = nativeVideo.cumulativeStarts;
     if (!cumStarts.length) return;
@@ -4740,8 +4870,9 @@ async function seekNativeDayCollectionBySec(targetSec) {
         // Load segment if different
         const wasPlaying = nativeVideo.playing;
         if (segIdx !== nativeVideo.currentSegmentIdx) {
-            await loadNativeSegment(segIdx);
+            if (!await loadNativeSegment(segIdx)) return;
         }
+        if (state.collection.active !== collection) return;
         
         // Seek within segment
         const vid = nativeVideo.master;
@@ -4827,12 +4958,30 @@ initCameraRearrange({
     updateEventCameraHighlight
 });
 
-// Remote files are complete local snapshots before entering existing playback/export.
-initRcloneBrowser(async ({ directory, source }) => {
+// The manifest is the library; no filesystem scan or full-folder download.
+initRcloneBrowser(async ({ directory, source, files }) => {
+    if (!seiType) throw new Error(t('ui.notifications.metadataParserNotReady'));
+    if (!Array.isArray(files) || !isRcloneStreamUrl(`${directory}/thumb.png`)) throw new Error('Invalid remote recording manifest');
+    const folder = String(source?.folder || 'RecentClips').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    const entries = files.map(file => {
+        if (!isRcloneStreamUrl(file.path) || !file.path.startsWith(`${directory}/`) || file.name.includes('/') || file.name.includes('\\')) {
+            throw new Error('Invalid remote recording manifest');
+        }
+        return { name: file.name, path: file.path, size: file.size, isElectronFile: true,
+            isRemote: true, webkitRelativePath: `Remote/${folder}/${file.name}` };
+    });
+    const built = await buildTeslaCamIndex(entries, 'Remote');
+    if (!built.groups.length) throw new Error(t('ui.notifications.noDashcamClipsFound'));
+    activeLibraryController?.abort();
+    activeLibraryController = new AbortController();
+    resetDashboardAndMap();
+    pauseNative();
+    folderStructure = null;
+    rootDirHandle = null;
+    eventMetaByKey.clear();
     baseFolderPath = directory;
-    showLoading('Opening remote recordings...', 'Preparing local playback and export');
     try {
-        await traverseDirectoryElectron(directory);
+        await handleFolderFiles(entries, 'Remote');
         library.folderLabel = `${source.remote}:${source.folder}`;
         clipBrowserSubtitle.textContent = library.folderLabel;
     } finally { hideLoading(); }

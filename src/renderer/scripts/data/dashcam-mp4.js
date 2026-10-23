@@ -18,11 +18,15 @@ class DashcamMP4 {
             const headerSize = size === 1 ? 16 : 8;
 
             if (size === 1) {
+                if (pos + 16 > end) throw new Error('Truncated extended MP4 box');
                 const high = this.view.getUint32(pos + 8);
                 const low = this.view.getUint32(pos + 12);
                 size = Number((BigInt(high) << 32n) | BigInt(low));
             } else if (size === 0) {
                 size = end - pos;
+            }
+            if (!Number.isSafeInteger(size) || size < headerSize || size > end - pos) {
+                throw new Error('Invalid MP4 box size');
             }
 
             if (type === name) {
@@ -70,14 +74,17 @@ class DashcamMP4 {
         const timescale = mdhdVersion === 1
             ? this.view.getUint32(mdhd.start + 20)
             : this.view.getUint32(mdhd.start + 12);
+        if (!timescale) throw new Error('Invalid MP4 timescale');
 
         // Get frame durations from stts (delta ticks per frame -> converted to ms)
         const stts = this.findBox(stbl.start, stbl.end, 'stts');
         const entryCount = this.view.getUint32(stts.start + 4);
+        if (entryCount > Math.floor((stts.end - stts.start - 8) / 8)) throw new Error('Truncated MP4 timing table');
         const durations = [];
         let pos = stts.start + 8;
         for (let i = 0; i < entryCount; i++) {
             const count = this.view.getUint32(pos);
+            if (count > 1000000 - durations.length) throw new Error('MP4 timing table exceeds telemetry memory limit');
             const delta = this.view.getUint32(pos + 4);
             const ms = (delta / timescale) * 1000;
             for (let j = 0; j < count; j++) durations.push(ms);

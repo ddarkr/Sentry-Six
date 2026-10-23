@@ -8,6 +8,7 @@ import { notify } from '../ui/notifications.js';
 import { formatTimeHMS } from '../ui/timeDisplay.js';
 import { initBlurZoneEditor, getNormalizedCoordinates, resetBlurZoneEditor, generateMaskImage, getCanvasDimensions } from '../ui/blurZoneEditor.js';
 import { filePathToUrl } from '../lib/utils.js';
+import { extractSeiFromEntry } from '../core/seiExtractor.js';
 import { parseTimestampKeyToEpochMs } from '../core/clipBrowser.js';
 import { t, getCurrentLanguage, onLanguageChange } from '../lib/i18n.js';
 
@@ -1231,6 +1232,7 @@ export async function openBlurZoneEditorForCamera(snapshotCamera, editorModal, e
 
         // Create temporary video element
         const tempVideo = document.createElement('video');
+        tempVideo.crossOrigin = 'anonymous';
         tempVideo.muted = true;
         tempVideo.playsInline = true;
         tempVideo.style.display = 'none';
@@ -1892,8 +1894,8 @@ export async function startExport() {
     const startPct = exportState.startMarkerPct ?? 0;
     const endPct = exportState.endMarkerPct ?? 100;
 
-    const startTimeMs = (Math.min(startPct, endPct) / 100) * totalSec * 1000;
-    const endTimeMs = (Math.max(startPct, endPct) / 100) * totalSec * 1000;
+    let startTimeMs = (Math.min(startPct, endPct) / 100) * totalSec * 1000;
+    let endTimeMs = (Math.max(startPct, endPct) / 100) * totalSec * 1000;
 
     // Coincident markers produce a zero-length export that FFmpeg either fails
     // on or writes as an empty file — catch it before any heavy work starts
@@ -1943,6 +1945,29 @@ export async function startExport() {
     const progressText = $('exportProgressText');
 
     exportState.isExporting = true;
+    exportState.cancelled = false;
+    exportState.abortController = new AbortController();
+    try {
+        const range = await nativeVideo?.ensureExportDurations?.(startTimeMs / 1000, endTimeMs / 1000, { signal: exportState.abortController.signal });
+        if (range) {
+            startTimeMs = range.startSec * 1000;
+            endTimeMs = range.endSec * 1000;
+            const correctedTotal = nativeVideo.cumulativeStarts.at(-1);
+            if (exportState.startMarkerPct !== null) exportState.startMarkerPct = range.startSec / correctedTotal * 100;
+            if (exportState.endMarkerPct !== null) exportState.endMarkerPct = range.endSec / correctedTotal * 100;
+            updateExportMarkers();
+            updateExportRangeDisplay();
+        }
+        if (exportState.abortController.signal.aborted) throw new DOMException('Export cancelled', 'AbortError');
+        if (endTimeMs - startTimeMs < 100) {
+            throw new Error(t('ui.export.exportRangeTooShort') || 'Export range is too short — move the start and end markers apart');
+        }
+    } catch (err) {
+        exportState.isExporting = false;
+        if (startBtn) startBtn.disabled = false;
+        if (!exportState.cancelled) notify(err.message, { type: 'error' });
+        return;
+    }
     if (startBtn) startBtn.disabled = true;
 
     // Switch close button to minimize icon during export
@@ -1970,12 +1995,7 @@ export async function startExport() {
             const allSeiData = [];
             const allMapPath = []; // Collect GPS coordinates
 
-            if (!window.DashcamMP4 || !window.DashcamHelpers) {
-                throw new Error('Dashcam parser not available');
-            }
-
-            const DashcamMP4 = window.DashcamMP4;
-            const { SeiMetadata } = await window.DashcamHelpers.initProtobuf();
+            // Shared extractor bounds remote reads and honors export cancellation.
 
             // Helper to check for valid GPS coordinates
             // SEI uses latitude_deg/longitude_deg field names
@@ -2030,43 +2050,12 @@ export async function startExport() {
 
                     if (entry?.file) {
                         try {
-                            let buffer = null;
-
-                            // Load file into buffer (one at a time)
-                            if (entry.file?.isElectronFile && entry.file?.path) {
-                                const fileUrl = filePathToUrl(entry.file.path);
-                                const response = await fetch(fileUrl);
-                                buffer = await response.arrayBuffer();
-                            } else if (entry.file instanceof File) {
-                                buffer = await entry.file.arrayBuffer();
-                            } else if (entry.file.path) {
-                                const fileUrl = filePathToUrl(entry.file.path);
-                                const response = await fetch(fileUrl);
-                                buffer = await response.arrayBuffer();
-                            }
-
-                            if (buffer) {
-                                // Extract SEI data from this segment
-                                const mp4 = new DashcamMP4(buffer);
-                                const frames = mp4.parseFrames(SeiMetadata);
-
-                                // Convert segment-relative timestamps to absolute time
-                                for (const frame of frames) {
-                                    if (frame.sei) {
-                                        allSeiData.push({
-                                            timestampMs: segStartMs + frame.timestamp,
-                                            sei: frame.sei
-                                        });
-
-                                        // Extract GPS coordinates for minimap path
-                                        if (includeMinimap && hasValidGps(frame.sei)) {
-                                            allMapPath.push([frame.sei.latitude_deg, frame.sei.longitude_deg]);
-                                        }
-                                    }
+                            const extracted = await extractSeiFromEntry(entry, null, { signal: exportState.abortController?.signal });
+                            for (const frame of extracted.seiData || []) {
+                                allSeiData.push({ timestampMs: segStartMs + (frame.frameTimestampMs ?? frame.timestampMs), sei: frame.sei });
+                                if (includeMinimap && hasValidGps(frame.sei)) {
+                                    allMapPath.push([frame.sei.latitude_deg, frame.sei.longitude_deg]);
                                 }
-
-                                // Explicitly clear buffer reference to help GC
-                                buffer = null;
                             }
                         } catch (err) {
                             console.warn(`Failed to extract SEI from segment ${i}:`, err);
@@ -2112,6 +2101,12 @@ export async function startExport() {
     }
     // If dashboard and minimap are both disabled, seiData remains null and no files are loaded into memory
 
+    if (exportState.cancelled) {
+        exportState.isExporting = false;
+        resetCloseButton();
+        if (startBtn) startBtn.disabled = false;
+        return;
+    }
     const segments = [];
     const groups2 = state.collection.active.groups || [];
     const cumStarts2 = nativeVideo?.cumulativeStarts || [];
@@ -2375,6 +2370,7 @@ export function confirmCancelExport() {
 export async function cancelExport() {
     // Set cancellation flag immediately so SEI extraction loop can check it
     exportState.cancelled = true;
+    exportState.abortController?.abort();
 
     if (exportState.currentExportId && window.electronAPI?.cancelExport) {
         await window.electronAPI.cancelExport(exportState.currentExportId);

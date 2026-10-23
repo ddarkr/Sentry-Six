@@ -149,6 +149,19 @@ Join our [Discord Server](https://discord.com/invite/9QZEzVwdnt)!
 3. Pick a clip from the sidebar
 4. Use the playback controls and in/out markers to select the part of the clip you'd like to export.
 
+For cloud recordings, use **Remote folders** beside the local-folder button.
+With [rclone installed and configured](RCLONE.md), **Stream this folder** opens
+a read-only manifest and plays remote byte ranges without downloading the whole
+folder first. There is no 2 GiB playback-folder limit. Internet access and provider
+quota are still required; there is no persistent offline playback cache.
+Durations are approximate until read, and current or explicitly requested master
+clip telemetry may read a complete clip incrementally. Export temporarily stages
+only the selected original files (up to 2 GiB combined), then cleans them up.
+Google Drive duplicates with matching sizes and stored MD5 checksums are used
+once without changing the originals. Conflicting or unverifiable duplicates
+still block opening. See [remote recording details](RCLONE.md) for loopback
+authentication, tradeoffs and verification scope.
+
 ## Notes
 - SEI telemetry is typically not recorded while parked
 - SEI telemetry while using Smart Summon will be notated as manual

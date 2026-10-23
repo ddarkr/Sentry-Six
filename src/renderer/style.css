@@ -2474,7 +2474,11 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .progress-bar::-webkit-slider-runnable-track {
-    background: var(--scrollbar-thumb);
+    background-color: var(--scrollbar-thumb);
+    background-image: var(--buffered-ranges, none);
+    background-size: calc(100% - 14px) 100%;
+    background-position: center;
+    background-repeat: no-repeat;
     border-radius: 100px;
     height: 6px;
 }
@@ -2821,6 +2825,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 /* Timeline Container with markers */
 .timeline-container {
     flex: 1;
+    min-width: 0;
     position: relative;
     display: flex;
     align-items: center;
@@ -2828,6 +2833,40 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 .timeline-container .progress-bar {
     width: 100%;
+}
+
+.playback-buffer-status:not([hidden]) {
+    position: absolute;
+    top: calc(50% + 14px);
+    left: 0;
+    right: 0;
+    display: flex;
+    gap: 8px;
+    font-size: 11px;
+    line-height: 14px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.playback-buffer-status span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#playbackBufferState {
+    flex: 0 1 auto;
+    color: var(--text-color);
+}
+
+#playbackBufferDetail {
+    flex: 1 1 0;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.playback-buffer-status[data-state="error"] #playbackBufferState {
+    color: var(--error-color);
 }
 
 /* Timeline Markers */
