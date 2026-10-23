@@ -89,9 +89,12 @@ function seiCacheKey(entry) {
  * Results are cached (bounded LRU) so revisiting a recent segment is instant.
  * @param {Object} entry - Clip entry with file property
  * @param {string} seiType - SEI type identifier
+ * @param {Object} options - Optional signal, beforeRead gate and onProgress({seiData, mapPath, processedUntilMs}).
+ * Progress arrays are shared and append-only; consumers must not mutate them.
+ * Remote progress covers parsed video frames even when they contain no SEI.
  * @returns {Promise<{seiData: Array, mapPath: Array}>}
  */
-export async function extractSeiFromEntry(entry, seiType, { signal } = {}) {
+export async function extractSeiFromEntry(entry, seiType, { signal, beforeRead, onProgress } = {}) {
     if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError');
     if (!entry) return { seiData: [], mapPath: [] };
 
@@ -107,17 +110,27 @@ export async function extractSeiFromEntry(entry, seiType, { signal } = {}) {
     let result = { seiData: [], mapPath: [] };
 
     if (isRcloneStreamUrl(entry.file?.path)) {
+        await beforeRead?.();
+        if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError');
         if (!window.DashcamMP4 || !window.DashcamHelpers) throw new Error('Telemetry parser unavailable');
         const { SeiMetadata } = await window.DashcamHelpers.initProtobuf();
-        const seiData = await extractRemoteFrames(entry.file.path, SeiMetadata, signal);
-        const mapPath = seiData.filter(({ sei }) => hasValidGps(sei)).map(({ timestampMs, sei }) => {
-            const apState = sei.autopilotState ?? sei.autopilot_state;
-            return {
-                lat: Number(sei.latitudeDeg ?? sei.latitude_deg),
-                lon: Number(sei.longitudeDeg ?? sei.longitude_deg),
-                timestampMs,
-                autopilot: apState != null && apState !== 0 && apState !== 'DISABLED'
-            };
+        const mapPath = [];
+        let mappedFrames = 0;
+        const seiData = await extractRemoteFrames(entry.file.path, SeiMetadata, signal, {
+            onProgress: ({ frames, processedUntilMs }) => {
+                for (; mappedFrames < frames.length; mappedFrames++) {
+                    const { timestampMs, sei } = frames[mappedFrames];
+                    if (!hasValidGps(sei)) continue;
+                    const apState = sei.autopilotState ?? sei.autopilot_state;
+                    mapPath.push({
+                        lat: Number(sei.latitudeDeg ?? sei.latitude_deg),
+                        lon: Number(sei.longitudeDeg ?? sei.longitude_deg),
+                        timestampMs,
+                        autopilot: apState != null && apState !== 0 && apState !== 'DISABLED'
+                    });
+                }
+                if (!signal?.aborted) onProgress?.({ seiData: frames, mapPath, processedUntilMs });
+            }
         });
         result = { seiData, mapPath };
     } else if (entry.file?.isElectronFile && entry.file?.path) {

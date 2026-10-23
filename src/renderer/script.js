@@ -46,7 +46,7 @@ import {
 import { matchClipsTodrives } from './scripts/core/driveGrouper.js';
 import { initDriveBrowser, renderDriveList, setDriveTagFilter } from './scripts/core/driveBrowser.js';
 import { initI18n, t, onLanguageChange } from './scripts/lib/i18n.js';
-import { createPlaybackBuffering } from './scripts/ui/playbackBuffering.js';
+import { bufferedAhead, createPlaybackBuffering } from './scripts/ui/playbackBuffering.js';
 
 // State
 const player = state.player;
@@ -4001,6 +4001,7 @@ const nativeVideo = {
     currentSegmentIdx: -1,
     syncInterval: null,
     seiData: [],            // Pre-extracted SEI: [{timestampMs, sei}, ...]
+    seiParsedUntilMs: Infinity, // Partial remote telemetry must not describe unparsed playback time.
     mapPath: [],            // GPS path for map polyline
     segmentDurations: [],   // Actual duration of each segment in seconds
     cumulativeStarts: [],   // Cumulative start time of each segment in seconds
@@ -4199,7 +4200,7 @@ function telemetryAnimationLoop() {
     if (!nativeVideo.isTransitioning) {
         const currentVidMs = (vid.currentTime || 0) * 1000;
         
-        const sei = findSeiAtTime(nativeVideo.seiData, currentVidMs);
+        const sei = currentVidMs <= nativeVideo.seiParsedUntilMs ? findSeiAtTime(nativeVideo.seiData, currentVidMs) : null;
         if (sei) {
             updateVisualization(sei);
             nativeVideo.lastSeiTimeMs = currentVidMs;
@@ -4207,7 +4208,7 @@ function telemetryAnimationLoop() {
         } else {
             const lastSei = nativeVideo.lastSeiTimeMs ?? -Infinity;
             const timeSinceLastSei = currentVidMs - lastSei;
-            if (timeSinceLastSei > 2000 && !nativeVideo.dashboardReset) {
+            if ((currentVidMs > nativeVideo.seiParsedUntilMs || timeSinceLastSei > 2000) && !nativeVideo.dashboardReset) {
                 resetDashboardElements();
                 nativeVideo.dashboardReset = true;
             }
@@ -4246,7 +4247,7 @@ function onMasterTimeUpdate() {
     // Telemetry is now updated at ~60Hz by telemetryAnimationLoop — only update here as fallback
     // when the rAF loop isn't running (e.g. during scrub/seek while paused)
     if (!nativeVideo.telemetryRafId) {
-        const sei = findSeiAtTime(nativeVideo.seiData, currentVidMs);
+        const sei = currentVidMs <= nativeVideo.seiParsedUntilMs ? findSeiAtTime(nativeVideo.seiData, currentVidMs) : null;
         if (sei) {
             updateVisualization(sei);
             nativeVideo.lastSeiTimeMs = currentVidMs;
@@ -4254,7 +4255,7 @@ function onMasterTimeUpdate() {
         } else {
             const lastSei = nativeVideo.lastSeiTimeMs ?? -Infinity;
             const timeSinceLastSei = currentVidMs - lastSei;
-            if (timeSinceLastSei > 2000 && !nativeVideo.dashboardReset) {
+            if ((currentVidMs > nativeVideo.seiParsedUntilMs || timeSinceLastSei > 2000) && !nativeVideo.dashboardReset) {
                 resetDashboardElements();
                 nativeVideo.dashboardReset = true;
             }
@@ -4277,18 +4278,17 @@ function onMasterTimeUpdate() {
             const pct = (currentSec / totalSec) * 100;
             progressBar.value = Math.min(100, pct);
         }
-        return;
-    }
-    
-    // Single clip mode
-    const totalSec = vid.duration || 0;
-    updateTimeDisplayNew(currentVidSec, totalSec);
-    if (totalSec > 0 && !skipProgressUpdate) {
-        progressBar.value = (currentVidSec / totalSec) * 100;
+    } else {
+        // Single clip mode
+        const totalSec = vid.duration || 0;
+        updateTimeDisplayNew(currentVidSec, totalSec);
+        if (totalSec > 0 && !skipProgressUpdate) {
+            progressBar.value = (currentVidSec / totalSec) * 100;
+        }
     }
     
     // Sync other videos to master
-    syncMultiVideos(currentVidSec);
+    syncMultiVideos(currentVidSec, { automatic: true });
 }
 
 function onMasterLoaded() {
@@ -4378,6 +4378,31 @@ function onMasterEnded() {
 
 let nativeSegmentLoadRequest = 0;
 
+function waitForTelemetryBuffer(sources, signal) {
+    return new Promise((resolve, reject) => {
+        const events = ['progress', 'canplay', 'loadeddata', 'seeked', 'durationchange', 'error'];
+        const finish = error => {
+            for (const { video } of sources) for (const event of events) video.removeEventListener(event, check);
+            signal.removeEventListener('abort', check);
+            if (error) reject(error); else resolve();
+        };
+        const check = () => {
+            if (signal.aborted) return finish(signal.reason || new DOMException('Aborted', 'AbortError'));
+            if (sources.some(({ video, src }) => video.currentSrc === src && video.error)) {
+                return finish(new Error('Playback unavailable for telemetry'));
+            }
+            if (sources.every(({ video, src }) => {
+                const remaining = Number.isFinite(video.duration) ? Math.max(0, video.duration - video.currentTime) : 2;
+                return video.currentSrc === src && !video.seeking && video.readyState >= 3 &&
+                    bufferedAhead(video) >= Math.min(2, remaining);
+            })) finish();
+        };
+        for (const { video } of sources) for (const event of events) video.addEventListener(event, check);
+        signal.addEventListener('abort', check, { once: true });
+        check();
+    });
+}
+
 // Load a segment using native video elements (fast, GPU-accelerated)
 async function loadNativeSegment(segIdx, { transition = false } = {}) {
     const request = ++nativeSegmentLoadRequest;
@@ -4413,6 +4438,7 @@ async function loadNativeSegment(segIdx, { transition = false } = {}) {
     // Clear stale SEI data immediately to prevent old segment data from showing during transition
     stopTelemetryLoop();
     nativeVideo.seiData = [];
+    nativeVideo.seiParsedUntilMs = 0;
     nativeVideo.mapPath = [];
     nativeVideo.lastSeiTimeMs = -Infinity;
     nativeVideo.dashboardReset = false;
@@ -4529,13 +4555,23 @@ async function loadNativeSegment(segIdx, { transition = false } = {}) {
     dashboardVis.classList.add('visible');
     mapVis.classList.add('visible');
     
-    // Pre-extract SEI telemetry from master camera file (runs in background)
+    // Publish telemetry progressively, but let remote video acquire its initial buffer first.
     const masterCam = multi.masterCamera || 'front';
     const masterEntry = group.filesByCamera.get(masterCam) || group.filesByCamera.values().next().value;
     if (masterEntry && seiType) {
-        extractSeiFromEntry(masterEntry, seiType, { signal: telemetrySignal }).then(({ seiData, mapPath }) => {
+        extractSeiFromEntry(masterEntry, seiType, {
+            signal: telemetrySignal,
+            beforeRead: () => waitForTelemetryBuffer(bufferSources, telemetrySignal),
+            onProgress: ({ seiData, processedUntilMs }) => {
+                if (!isCurrent() || telemetrySignal.aborted) return;
+                nativeVideo.seiData = seiData;
+                nativeVideo.seiParsedUntilMs = processedUntilMs;
+                if (nativeVideo.master?.paused) onMasterTimeUpdate();
+            }
+        }).then(({ seiData, mapPath }) => {
             if (!isCurrent()) return;
             nativeVideo.seiData = seiData;
+            nativeVideo.seiParsedUntilMs = Infinity;
             // If the active collection has a full drive route, use it for the map
             // polyline instead of the per-clip SEI path so the entire route is visible.
             const driveMapPath = state.collection.active?.driveMapPath;
@@ -4627,7 +4663,15 @@ async function loadNativeSegment(segIdx, { transition = false } = {}) {
                     if (isCurrent() && map) map.invalidateSize();
                 }, 1000);
             }
-        }).catch(err => { if (err?.name !== 'AbortError') console.warn('SEI extraction failed:', err); });
+        }).catch(err => {
+            if (err?.name === 'AbortError') return;
+            if (isCurrent()) {
+                nativeVideo.seiData = [];
+                nativeVideo.seiParsedUntilMs = 0;
+                resetDashboardElements();
+            }
+            console.warn('SEI extraction failed:', err);
+        });
     }
     
     // Wait for master to be ready

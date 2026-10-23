@@ -115,19 +115,22 @@ export function forceResyncAllVideos() {
 }
 
 /**
- * Regular sync for timeupdate events (less aggressive)
+ * Synchronize explicit seeks immediately; automatic correction waits for playable frames.
  * @param {number} targetTime - Target time to sync to
  */
-export function syncMultiVideos(targetTime) {
+export function syncMultiVideos(targetTime, { automatic = false } = {}) {
     const nativeVideo = getNativeVideo?.();
     const videoBySlot = getVideoBySlot?.();
     const state = getState?.();
     
     if (!state?.multi?.enabled) return;
+    if (automatic && (!nativeVideo?.master || nativeVideo.master.paused ||
+        nativeVideo.master.seeking || nativeVideo.master.readyState < 3)) return;
     
     Object.entries(videoBySlot || {}).forEach(([slot, vid]) => {
         if (!vid || vid === nativeVideo?.master) return;
         if (!vid.src || vid.readyState < 1) return;
+        if (automatic && (vid.seeking || vid.readyState < 3)) return;
         
         const drift = Math.abs(vid.currentTime - targetTime);
         if (drift > 0.15) {

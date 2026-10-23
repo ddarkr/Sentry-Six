@@ -62,7 +62,8 @@ async function bytes(url, start, end, signal) {
     finally { await reader.close(); }
 }
 
-export async function extractRemoteFrames(url, SeiMetadata, signal) {
+// Progress arrays are shared, append-only, and read-only to consumers.
+export async function extractRemoteFrames(url, SeiMetadata, signal, { onProgress } = {}) {
     const boxes = [];
     let offset = 0, total = Infinity, metadata;
     while (offset < total) {
@@ -94,6 +95,14 @@ export async function extractRemoteFrames(url, SeiMetadata, signal) {
     const config = parser.getConfig();
     const frames = [];
     let frameIndex = 0, timestamp = 0, pendingSei = null;
+    let reportedUntilMs = 0, reportedSei = false;
+    const report = () => {
+        checkAbort(signal);
+        onProgress?.({ frames, processedUntilMs: timestamp });
+        reportedUntilMs = timestamp;
+        reportedSei = frames.length > 0;
+        checkAbort(signal);
+    };
     for (const box of boxes) {
         if (!box.size) continue;
         const { response, total: currentTotal } = await range(url, box.start, box.start + box.size - 1, signal);
@@ -123,6 +132,7 @@ export async function extractRemoteFrames(url, SeiMetadata, signal) {
                         timestamp += duration;
                         if (pendingSei) frames.push({ timestampMs: timestamp, frameTimestampMs, sei: pendingSei });
                         pendingSei = null;
+                        if (onProgress && ((!reportedSei && frames.length) || timestamp - reportedUntilMs >= 1000)) report();
                     }
                 }
                 remaining -= length;
@@ -130,5 +140,6 @@ export async function extractRemoteFrames(url, SeiMetadata, signal) {
         } finally { await reader.close(); }
     }
     checkAbort(signal);
+    if (onProgress) report();
     return frames;
 }

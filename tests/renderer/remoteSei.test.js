@@ -6,21 +6,29 @@ const { ReadableStream } = require('stream/web');
 const u32 = n => [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
 const box = (name, payload) => [...u32(payload.length + 8), ...Buffer.from(name), ...payload];
 const nal = data => [...u32(data.length), ...data];
-function fixture(after = false, tail = []) {
+function fixture(after = false, tail = [], samples = null) {
     const avcC = box('avcC', [1, 100, 0, 31, 255, 225, 0, 1, 7, 1, 0, 1, 8]);
     const stsd = box('stsd', [...u32(0), ...u32(1), ...box('avc1', [...new Array(78).fill(0), ...avcC])]);
-    const stts = box('stts', [...u32(0), ...u32(2), ...u32(1), ...u32(40), ...u32(1), ...u32(50)]);
+    const timing = samples
+        ? [...u32(samples.length), ...samples.flatMap(sample => [...u32(1), ...u32(sample.duration)])]
+        : [...u32(2), ...u32(1), ...u32(40), ...u32(1), ...u32(50)];
+    const stts = box('stts', [...u32(0), ...timing]);
     const mdhd = box('mdhd', [...new Array(12).fill(0), ...u32(1000)]);
     const moov = box('moov', box('trak', box('mdia', [...mdhd, ...box('minf', box('stbl', [...stsd, ...stts]))])));
-    const mdat = box('mdat', [
+    const payload = samples ? samples.flatMap(sample => [
+        ...(sample.value == null ? [] : nal([6, 5, 0, 0x42, 0x69, sample.value, 0x80])),
+        ...nal([1, 31])
+    ]) : [
         ...nal([6, 5, 0, 0x42, 0x69, 23, 0x80]), ...nal([5, 21, 22]),
-        ...nal([6, 5, 0, 0x42, 0x69, 24, 0x80]), ...nal([1, 31]), ...tail
-    ]);
+        ...nal([6, 5, 0, 0x42, 0x69, 24, 0x80]), ...nal([1, 31])
+    ];
+    const mdat = box('mdat', [...payload, ...tail]);
     return Uint8Array.from(after ? [...mdat, ...moov] : [...moov, ...mdat]);
 }
 function environment(data, { controller, abortDuringRead = false, truncate = false } = {}) {
     let canceled = 0;
     const requests = [];
+    const reads = [];
     const context = vm.createContext({
         window: {}, Uint8Array, DataView, DOMException, console,
         fetch: async (url, { headers }) => {
@@ -28,6 +36,8 @@ function environment(data, { controller, abortDuringRead = false, truncate = fal
             const [, a, b] = /^bytes=(\d+)-(\d+)$/.exec(headers.Range);
             const start = Number(a), end = Number(b);
             let position = start;
+            const read = { start, end, position };
+            reads.push(read);
             return {
                 status: 206,
                 headers: { get: () => `bytes ${start}-${end}/${data.length}` },
@@ -39,6 +49,7 @@ function environment(data, { controller, abortDuringRead = false, truncate = fal
                         const next = Math.min(position + 3, stop);
                         stream.enqueue(data.slice(position, next));
                         position = next;
+                        read.position = position;
                     },
                     cancel() { canceled++; }
                 })
@@ -47,7 +58,7 @@ function environment(data, { controller, abortDuringRead = false, truncate = fal
     });
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../../src/renderer/scripts/data/dashcam-mp4.js'), 'utf8'), context);
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../../src/renderer/scripts/core/remoteSei.js'), 'utf8').replace('export async function', 'async function'), context);
-    return { context, requests, canceled: () => canceled };
+    return { context, requests, reads, canceled: () => canceled };
 }
 const decoder = { decode: bytes => ({ value: bytes[0] }) };
 
@@ -98,4 +109,111 @@ test('extended-size and to-EOF mdat boxes retain telemetry', async () => {
     eof.set(u32(0), offset);
     const second = environment(eof);
     expect((await second.context.extractRemoteFrames('active', decoder)).map(frame => frame.timestampMs)).toEqual([40, 90]);
+});
+
+test('progress batches media coverage without SEI and preserves late telemetry', async () => {
+    const samples = Array.from({ length: 30 }, (_, index) => ({
+        duration: 100, value: index === 0 ? 23 : index === 28 ? 24 : null
+    }));
+    const data = fixture(false, [], samples);
+    const { context, reads } = environment(data);
+    const progress = [];
+    let complete = false;
+    const frames = await context.extractRemoteFrames('active', decoder, undefined, {
+        onProgress: ({ frames, processedUntilMs }) => {
+            expect(complete).toBe(false);
+            if (!progress.length) expect(reads[reads.length - 1].position).toBeLessThan(data.length);
+            progress.push({ frames, count: frames.length, processedUntilMs });
+        }
+    });
+    complete = true;
+    expect(progress.map(item => [item.count, item.processedUntilMs])).toEqual([
+        [1, 100], [1, 1100], [1, 2100], [2, 3000]
+    ]);
+    expect(progress.every(item => item.frames === frames)).toBe(true);
+    const local = new context.window.DashcamMP4(data.buffer).parseFrames(decoder);
+    let time = 0;
+    expect(frames).toEqual(local.flatMap(frame => {
+        time += frame.duration;
+        return frame.sei ? [{ timestampMs: time, frameTimestampMs: frame.timestamp, sei: frame.sei }] : [];
+    }));
+});
+
+function loadExtractor(context) {
+    context.File = class File {};
+    context.isRcloneStreamUrl = () => true;
+    context.window.DashcamHelpers = { initProtobuf: async () => ({ SeiMetadata: {
+        decode: bytes => ({ value: bytes[0], latitudeDeg: 37, longitudeDeg: 127 })
+    } }) };
+    const source = fs.readFileSync(path.join(__dirname, '../../src/renderer/scripts/core/seiExtractor.js'), 'utf8')
+        .replace(/^import .*;\n/gm, '').replace(/^export /gm, '');
+    vm.runInContext(source, context);
+}
+
+test('entry progress builds shared map incrementally; abort never caches partial data', async () => {
+    const { context, requests } = environment(fixture());
+    loadExtractor(context);
+    const entry = { file: { isElectronFile: true, path: 'remote' } };
+    const controller = new AbortController();
+    const abortedProgress = [];
+    await expect(context.extractSeiFromEntry(entry, null, {
+        signal: controller.signal,
+        onProgress: value => {
+            abortedProgress.push(value);
+            controller.abort();
+        }
+    })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(abortedProgress).toHaveLength(1);
+    expect(abortedProgress[0].seiData).toHaveLength(1);
+    const progress = [];
+    const result = await context.extractSeiFromEntry(entry, null, { onProgress: value => {
+        progress.push({ ...value, count: value.mapPath.length });
+    } });
+    expect(progress.map(value => value.count)).toEqual([1, 2]);
+    expect(progress.every(value => value.mapPath === result.mapPath && value.seiData === result.seiData)).toBe(true);
+    expect(result.mapPath.map(point => point.timestampMs)).toEqual([40, 90]);
+    expect(result.seiData.map(frame => frame.sei.value)).toEqual([23, 24]);
+    const cachedRequests = requests.length;
+    const onProgress = jest.fn();
+    expect(await context.extractSeiFromEntry(entry, null, { onProgress })).toBe(result);
+    expect(requests).toHaveLength(cachedRequests);
+    expect(onProgress).not.toHaveBeenCalled();
+});
+
+test('truncation after progress does not cache incomplete telemetry', async () => {
+    const { context } = environment(fixture(false, [0, 0, 0]));
+    loadExtractor(context);
+    const entry = { file: { isElectronFile: true, path: 'truncated' } };
+    const onProgress = jest.fn();
+    await expect(context.extractSeiFromEntry(entry, null, { onProgress })).rejects.toThrow('Truncated');
+    expect(onProgress).toHaveBeenCalledTimes(1);
+    await expect(context.extractSeiFromEntry(entry, null)).rejects.toThrow('Truncated');
+});
+
+test('remote reads wait for playback while completed cache hits bypass the gate', async () => {
+    const { context, requests } = environment(fixture());
+    loadExtractor(context);
+    const entry = { file: { isElectronFile: true, path: 'gated' } };
+    let release;
+    const waiting = context.extractSeiFromEntry(entry, null, {
+        beforeRead: () => new Promise(resolve => { release = resolve; })
+    });
+    await Promise.resolve();
+    expect(requests).toEqual([]);
+    release();
+    const complete = await waiting;
+    expect(complete.seiData.map(frame => frame.sei.value)).toEqual([23, 24]);
+    const cached = await context.extractSeiFromEntry(entry, null, {
+        beforeRead: () => { throw new Error('Cached telemetry must not wait for video'); }
+    });
+    expect(cached.seiData.map(frame => frame.sei.value)).toEqual([23, 24]);
+
+    const controller = new AbortController();
+    requests.length = 0;
+    const cancelled = context.extractSeiFromEntry({ file: { isElectronFile: true, path: 'obsolete' } }, null, {
+        signal: controller.signal, beforeRead: () => new Promise(resolve => { release = resolve; })
+    });
+    controller.abort(); release();
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+    expect(requests).toEqual([]);
 });

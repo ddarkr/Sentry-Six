@@ -45,17 +45,34 @@ export function createPlaybackBuffering({ root, status, detail, slider, t, camer
     let isActive = () => true;
     let getTimeline = () => ({});
     const cleanups = [];
+    let timelineSnapshot = null;
     function render() {
         if (!root) return;
-        root.hidden = !entries.length || !isActive();
+        const hidden = !entries.length || !isActive();
+        if (root.hidden !== hidden) root.hidden = hidden;
         if (slider) {
             const current = !root.hidden && entries.every(({ video, src, started }) =>
                 started && video.src === src && video.currentSrc === src && !video.error);
-            const ranges = current ? bufferedTimelineRanges(entries.map(entry => entry.video), getTimeline()) : [];
-            const gradient = ranges.map(([start, end]) =>
-                `linear-gradient(to right, transparent ${start}%, var(--text-secondary) ${start}%, var(--text-secondary) ${end}%, transparent ${end}%)`).join(', ');
-            if (gradient) slider.style.setProperty('--buffered-ranges', gradient);
-            else slider.style.removeProperty('--buffered-ranges');
+            const timeline = current ? getTimeline() : {};
+            const snapshot = current ? [timeline.offset, timeline.duration, timeline.segmentDuration] : [];
+            if (current) {
+                for (const { video } of entries) {
+                    const buffered = video.buffered;
+                    snapshot.push(buffered.length);
+                    for (let i = 0; i < buffered.length; i++) snapshot.push(buffered.start(i), buffered.end(i));
+                }
+            }
+            if (!timelineSnapshot || snapshot.length !== timelineSnapshot.length ||
+                snapshot.some((value, index) => !Object.is(value, timelineSnapshot[index]))) {
+                timelineSnapshot = snapshot;
+                const ranges = current ? bufferedTimelineRanges(entries.map(entry => entry.video), timeline) : [];
+                const gradient = ranges.map(([start, end]) =>
+                    `linear-gradient(to right, transparent ${start}%, var(--text-secondary) ${start}%, var(--text-secondary) ${end}%, transparent ${end}%)`).join(', ');
+                if (slider.style.getPropertyValue('--buffered-ranges') !== gradient) {
+                    if (gradient) slider.style.setProperty('--buffered-ranges', gradient);
+                    else slider.style.removeProperty('--buffered-ranges');
+                }
+            }
         }
         if (root.hidden) return;
         const result = bufferingState(entries.map(entry => {
@@ -65,15 +82,17 @@ export function createPlaybackBuffering({ root, status, detail, slider, t, camer
                 waiting: entry.waiting && video.readyState < 3,
                 error: entry.started && video.error, ahead: entry.seen ? bufferedAhead(video) : 0 };
         }));
-        root.dataset.state = result.state;
+        if (root.dataset.state !== result.state) root.dataset.state = result.state;
         const cameras = entries.map(entry => cameraLabel(entry.camera)).join(', ');
-        root.title = t('ui.buffering.cameras', { cameras });
+        const tooltip = t('ui.buffering.cameras', { cameras });
+        if (root.getAttribute('data-tip') !== tooltip) root.setAttribute('data-tip', tooltip);
         const text = t(`ui.buffering.${result.state}`, {
             waiting: result.waiting, total: entries.length,
             cameras: result.errors.map(entry => cameraLabel(entry.camera)).join(', ')
         });
         if (status.textContent !== text) status.textContent = text;
-        detail.textContent = t('ui.buffering.ahead', { seconds: result.ahead.toFixed(1) });
+        const ahead = t('ui.buffering.ahead', { seconds: result.ahead.toFixed(1) });
+        if (detail.textContent !== ahead) detail.textContent = ahead;
     }
     function reset() {
         cleanups.splice(0).forEach(cleanup => cleanup());

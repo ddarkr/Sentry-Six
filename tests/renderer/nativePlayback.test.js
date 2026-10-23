@@ -7,6 +7,8 @@ function fixture() {
     const listeners = {};
     const video = {
         currentTime: 9, duration: 60, readyState: 3, src: '',
+        get currentSrc() { return this.src; },
+        buffered: { length: 1, start: () => 0, end: () => 60 },
         pause() {}, load() {},
         addEventListener(name, fn) { (listeners[name] ||= new Set()).add(fn); },
         removeEventListener(name, fn) { listeners[name]?.delete(fn); }
@@ -19,7 +21,7 @@ function fixture() {
         console: { log: noop, warn: noop, error: noop },
         activeTelemetryController: null,
         playbackBuffering: { reset: jest.fn(), setSources: jest.fn() },
-        AbortController,
+        AbortController, DOMException,
         state: { collection: { active: collection }, ui: { nativeVideoMode: true }, multi: { enabled: true } },
         nativeVideo: { master: video, currentSegmentIdx: -1, cumulativeStarts: [0, 60, 120], telemetryRafId: 1 },
         videoMain: video, videoBySlot: {}, videoUrls: new Map(), multi: { enabled: false }, selection: {},
@@ -29,15 +31,17 @@ function fixture() {
         map: null, window: {}, setTimeout: () => 1, clearTimeout: noop,
         applyPlaybackRate: jest.fn(), updateTimeDisplayNew: jest.fn(), updateRecordingTime: noop,
         playNative: jest.fn(), updatePlayButton: jest.fn(),
-        progressBar: { value: 42 }, findSeiAtTime: noop, resetDashboardElements: noop,
+        progressBar: { value: 42 }, findSeiAtTime: noop, resetDashboardElements: jest.fn(), updateVisualization: jest.fn(),
         getNativeVideo: () => context.nativeVideo, getVideoBySlot: () => context.videoBySlot, getState: () => context.state
     });
+    const buffering = fs.readFileSync(path.join(__dirname, '../../src/renderer/scripts/ui/playbackBuffering.js'), 'utf8');
+    vm.runInContext(buffering.slice(0, buffering.indexOf('\nexport function bufferingState')).replace('export function', 'function'), context);
     const sync = fs.readFileSync(path.join(__dirname, '../../src/renderer/scripts/ui/multiCamFocus.js'), 'utf8');
     vm.runInContext(sync.slice(sync.indexOf('export function syncMultiVideos')).replace('export function', 'function'), context);
     vm.runInContext(source.slice(source.indexOf('let nativeSegmentLoadRequest ='), source.indexOf('\nfunction playNative()')), context);
     vm.runInContext(source.slice(source.indexOf('function onMasterTimeUpdate()'), source.indexOf('\nfunction onMasterLoaded()')), context);
     vm.runInContext(source.slice(source.indexOf('function onMasterEnded()'), source.indexOf('\nlet nativeSegmentLoadRequest =')), context);
-    return { context, video, pending, collection, ready: index => {
+    return { context, video, pending, collection, emit: name => [...(listeners[name] || [])].forEach(fn => fn()), ready: index => {
         const callbacks = [...(listeners.canplay || [])];
         (index === undefined ? callbacks : [callbacks[index]]).forEach(fn => fn());
     } };
@@ -106,6 +110,90 @@ test.each(['replace', 'clear'])('collection %s invalidates pending telemetry and
     }
 });
 
+test.each([true, false])('timeupdate synchronizes cameras in collection mode=%s without fighting scrubbing', collectionMode => {
+    const { context: c, video } = fixture();
+    if (!collectionMode) c.state.collection.active = null;
+    const drifted = { src: 'rear', readyState: 3, currentTime: 8 };
+    const close = { src: 'left', readyState: 3, currentTime: 9.1 };
+    c.videoBySlot = { drifted, close };
+    c.state.ui.isScrubbing = true;
+    c.onMasterTimeUpdate();
+    expect(drifted.currentTime).toBe(video.currentTime);
+    expect(close.currentTime).toBe(9.1);
+    expect(c.progressBar.value).toBe(42);
+    c.nativeVideo.isTransitioning = true;
+    drifted.currentTime = 3;
+    c.onMasterTimeUpdate();
+    expect(drifted.currentTime).toBe(3);
+});
+
+test('automatic correction skips starved or seeking cameras while explicit seeks still take precedence', () => {
+    const { context: c, video } = fixture();
+    const lagging = { src: 'rear', readyState: 2, currentTime: 1, seeking: false };
+    c.videoBySlot = { lagging };
+    c.syncMultiVideos(9, { automatic: true });
+    expect(lagging.currentTime).toBe(1);
+    lagging.readyState = 3; lagging.seeking = true;
+    c.syncMultiVideos(9, { automatic: true });
+    expect(lagging.currentTime).toBe(1);
+    c.syncMultiVideos(20);
+    expect(lagging.currentTime).toBe(20);
+    lagging.seeking = false; video.currentTime = 25;
+    c.syncMultiVideos(25, { automatic: true });
+    expect(lagging.currentTime).toBe(25);
+    video.seeking = true;
+    c.syncMultiVideos(30, { automatic: true });
+    expect(lagging.currentTime).toBe(25);
+});
+
+test('remote telemetry waits for every active camera buffer and aborts obsolete waits', async () => {
+    const { context: c, video, emit } = fixture();
+    video.src = 'front';
+    const side = { ...video, src: 'side', currentSrc: 'side', currentTime: 0,
+        buffered: { length: 1, start: () => 0, end: () => 1 } };
+    const controller = new AbortController();
+    let started = false;
+    const sources = [{ video, src: 'front' }, { video: side, src: 'side' }];
+    const waiting = c.waitForTelemetryBuffer(sources, controller.signal).then(() => { started = true; });
+    await flush();
+    expect(started).toBe(false);
+    side.buffered.end = () => 2;
+    emit('progress');
+    await waiting;
+    expect(started).toBe(true);
+    side.buffered.end = () => 0;
+    const obsolete = c.waitForTelemetryBuffer(sources, controller.signal);
+    controller.abort();
+    await expect(obsolete).rejects.toMatchObject({ name: 'AbortError' });
+    const short = new AbortController();
+    side.duration = 0.5; side.buffered.end = () => 0.5;
+    await c.waitForTelemetryBuffer(sources, short.signal);
+});
+
+test('partial telemetry covers only parsed playback and ignores superseded source callbacks', async () => {
+    const { context: c, video, ready } = fixture();
+    const first = c.loadNativeSegment(0);
+    const report = c.extractSeiFromEntry.mock.calls[0][2].onProgress;
+    report({ seiData: [{ sei: { speed: 1 } }], processedUntilMs: 3000 });
+    expect(c.nativeVideo.seiParsedUntilMs).toBe(3000);
+    c.nativeVideo.lastSeiTimeMs = 3900;
+    c.nativeVideo.dashboardReset = false;
+    c.nativeVideo.telemetryRafId = null;
+    c.findSeiAtTime = jest.fn(() => ({ speed: 1 }));
+    video.currentTime = 4;
+    c.onMasterTimeUpdate();
+    expect(c.findSeiAtTime).not.toHaveBeenCalled();
+    expect(c.resetDashboardElements).toHaveBeenCalled();
+    video.currentTime = 2;
+    c.onMasterTimeUpdate();
+    expect(c.updateVisualization).toHaveBeenCalledWith({ speed: 1 });
+    const second = c.loadNativeSegment(1);
+    report({ seiData: [{ sei: { speed: 99 } }], processedUntilMs: 60000 });
+    expect(c.nativeVideo.seiData).toEqual([]);
+    expect(c.nativeVideo.seiParsedUntilMs).toBe(0);
+    ready();
+    expect(await Promise.all([first, second])).toEqual([false, true]);
+});
 
 test('superseded automatic transition releases its guard without clearing a newer transition', async () => {
     const { context: c, pending, ready } = fixture();

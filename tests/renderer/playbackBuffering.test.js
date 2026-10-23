@@ -57,8 +57,17 @@ test('initial loading, partial readiness, paused frames, seeking, errors and rec
     expect(bufferingState([ready()]).state).toBe('ready');
 });
 
-function fixture() {
-    const root = { hidden: true, dataset: {} };
+function fixture({ t = (key, values) => key + (key.endsWith('ahead') ? values.seconds : key.endsWith('error') ? values.cameras : '') } = {}) {
+    const attributes = new Map();
+    const root = { hidden: true, dataset: {},
+        getAttribute: name => attributes.get(name) ?? null,
+        setAttribute: (name, value) => attributes.set(name, value) };
+    const properties = new Map();
+    const slider = { style: {
+        getPropertyValue: name => properties.get(name) || '',
+        setProperty: (name, value) => properties.set(name, value),
+        removeProperty: name => properties.delete(name)
+    } };
     let announcements = 0;
     const status = { get textContent() { return this.text; }, set textContent(text) { this.text = text; announcements++; } };
     const detail = {};
@@ -68,10 +77,10 @@ function fixture() {
         addEventListener(event, listener) { (listeners[event] ||= new Set()).add(listener); },
         removeEventListener(event, listener) { listeners[event].delete(listener); } };
     const emit = type => [...(listeners[type] || [])].forEach(listener => listener({ type }));
-    const controller = createPlaybackBuffering({ root, status, detail, cameraLabel: camera => camera,
-        t: (key, values) => key + (key.endsWith('ahead') ? values.seconds : key.endsWith('error') ? values.cameras : '') });
-    const register = (src = 'remote-a', active) => controller.setSources([{ video, src, camera: 'front' }], active);
-    return { root, status, detail, video, emit, controller, register, listeners, announcements: () => announcements };
+    const controller = createPlaybackBuffering({ root, status, detail, slider, cameraLabel: camera => camera, t });
+    const register = (src = 'remote-a', active, timeline) =>
+        controller.setSources([{ video, src, camera: 'front' }], active, timeline);
+    return { root, status, detail, slider, video, emit, controller, register, listeners, announcements: () => announcements };
 }
 
 test('native events recover waiting and seek states without announcing time updates', () => {
@@ -163,4 +172,107 @@ test('inactive collection and aborted waits do not leave stale buffering visible
     active = false;
     f.emit('progress');
     expect(f.root.hidden).toBe(true);
+});
+
+test('timeline refreshes for eviction, metadata remapping, source changes and inactivity', () => {
+    const f = fixture();
+    const timeline = { offset: 20, duration: 100, segmentDuration: 30 };
+    const gradient = () => f.slider.style.getPropertyValue('--buffered-ranges');
+    const expectBounds = values => {
+        const stops = [...gradient().matchAll(/(-?\d+(?:\.\d+)?)%/g)]
+            .filter((_, index) => index % 2 === 0).map(match => Number(match[1]));
+        expect(stops).toEqual(values.map(value => expect.closeTo(value, 6)));
+    };
+    f.register('remote-a', undefined, () => timeline);
+    f.video.readyState = 3;
+    f.video.buffered = ranges([[0, 10], [20, 30]]);
+    f.emit('canplay');
+    expectBounds([20, 30, 40, 50]);
+    const original = gradient();
+    f.video.currentTime = 1;
+    f.emit('timeupdate');
+    expect(gradient()).toBe(original);
+    f.video.buffered = ranges([[5, 10], [20, 30]]);
+    f.emit('progress');
+    expectBounds([25, 30, 40, 50]);
+    expect(gradient()).not.toBe(original);
+    timeline.duration = 200;
+    f.emit('durationchange');
+    expectBounds([12.5, 15, 20, 25]);
+    timeline.segmentDuration = 8;
+    f.emit('loadedmetadata');
+    expectBounds([12.5, 14]);
+    timeline.offset = 40;
+    f.controller.render();
+    expectBounds([22.5, 24]);
+    f.register('remote-b', undefined, () => timeline);
+    expect(gradient()).toBe('');
+    f.emit('progress');
+    expect(gradient()).toBe('');
+    f.video.src = f.video.currentSrc = 'remote-b';
+    f.emit('canplay');
+    expectBounds([22.5, 24]);
+    f.video.error = {};
+    f.emit('error');
+    expect(gradient()).toBe('');
+    expect(f.root.dataset.state).toBe('error');
+    f.controller.reset();
+    expect(gradient()).toBe('');
+});
+
+test('render updates translated tooltip and tenths of buffered seconds without title attributes', () => {
+    let locale = 'en';
+    const f = fixture({ t: (key, values) => `${locale}:${key}:${values.seconds ?? values.cameras ?? ''}` });
+    f.register();
+    f.video.readyState = 3;
+    f.video.buffered = ranges([[0, 10]]);
+    f.emit('canplay');
+    const tooltip = f.root.getAttribute('data-tip');
+    const status = f.status.textContent;
+    f.video.currentTime = 0.11;
+    f.emit('timeupdate');
+    expect(f.detail.textContent).toContain('9.9');
+    expect(f.status.textContent).toBe(status);
+    expect(f.root.getAttribute('data-tip')).toBe(tooltip);
+    locale = 'ko';
+    f.controller.render();
+    expect(f.root.getAttribute('data-tip')).toBe('ko:ui.buffering.cameras:front');
+    expect(f.status.textContent).toContain('ko:');
+    expect(f.detail.textContent).toContain('ko:ui.buffering.ahead:9.9');
+    expect(f.root.title).toBeUndefined();
+});
+
+test('unchanged renders do not rewrite DOM values or tooltip attributes', () => {
+    const f = fixture();
+    f.register();
+    f.video.readyState = 3;
+    f.video.buffered = ranges([[0, 10]]);
+    f.emit('canplay');
+    for (const [target, key] of [[f.root, 'hidden'], [f.root.dataset, 'state'],
+        [f.status, 'textContent'], [f.detail, 'textContent']]) {
+        let value = target[key];
+        Object.defineProperty(target, key, {
+            get: () => value,
+            set: next => { expect(next).not.toBe(value); value = next; }
+        });
+    }
+    const setAttribute = f.root.setAttribute;
+    f.root.setAttribute = (name, value) => {
+        expect(value).not.toBe(f.root.getAttribute(name));
+        setAttribute(name, value);
+    };
+    const setProperty = f.slider.style.setProperty;
+    f.slider.style.setProperty = (name, value) => {
+        expect(value).not.toBe(f.slider.style.getPropertyValue(name));
+        setProperty(name, value);
+    };
+    f.controller.render();
+    f.emit('progress');
+    f.video.currentTime = 0.01;
+    f.emit('timeupdate');
+    f.video.currentTime = 0.11;
+    f.emit('timeupdate');
+    expect(f.detail.textContent).toContain('9.9');
+    f.controller.reset();
+    f.controller.reset();
 });
