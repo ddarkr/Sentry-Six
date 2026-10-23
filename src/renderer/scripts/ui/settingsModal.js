@@ -185,6 +185,7 @@ export function initSettingsModal() {
     const driveDataFilePath = $('driveDataFilePath');
     const browseDriveDataFileBtn = $('browseDriveDataFileBtn');
     const clearDriveDataFileBtn = $('clearDriveDataFileBtn');
+    const browseRemoteDriveDataBtn = $('browseRemoteDriveDataBtn');
     const driveDataFileStatus = $('driveDataFileStatus');
 
     // Initialize settings values
@@ -565,6 +566,16 @@ export function initSettingsModal() {
                 setTimeout(() => { defaultFolderStatus.textContent = ''; }, 2000);
             }
             clearDefaultFolderBtn.blur();
+        };
+    }
+
+    if (browseRemoteDriveDataBtn) {
+        browseRemoteDriveDataBtn.hidden = !window.electronAPI?.rcloneOpenDriveData;
+        browseRemoteDriveDataBtn.onclick = async () => {
+            activeReturnCallback = null;
+            if (settingsModal) settingsModal.classList.add('hidden');
+            await onCloseRcloneSettings();
+            openRcloneBrowserCallback?.(null, true);
         };
     }
 

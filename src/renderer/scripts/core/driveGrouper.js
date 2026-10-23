@@ -51,6 +51,7 @@ function decodeUint8Field(value) {
  * Returns: epoch ms (local time, matching Tesla clip filenames), or null.
  */
 function parseRouteTimestampMs(file) {
+    if (typeof file !== 'string') return null;
     const basename = file.split('/').pop().split('\\').pop();
     const m = basename.match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/);
     if (!m) return null;
@@ -316,6 +317,9 @@ export function groupStoreDataIntoDrives(storeData) {
         if (startMs !== null) {
             routesWithTime.push({ ...r, _startMs: startMs });
         }
+    }
+    if (routesWithTime.length === 0) {
+        return { drives: [], driveCount: 0, routeCount: 0 };
     }
 
     // Sort routes chronologically

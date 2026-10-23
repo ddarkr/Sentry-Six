@@ -7,6 +7,11 @@ export function isReadOnlyRclonePath(value) {
     return isRcloneStreamUrl(value) || isRcloneStreamUrl(`${value}/thumb.png`);
 }
 
+let openDriveDataPicker = null;
+export function openRcloneDriveDataBrowser() {
+    openDriveDataPicker?.();
+}
+
 export function initRcloneBrowser(onOpen) {
     const api = window.electronAPI;
     const button = document.getElementById('rcloneOpenButton');
@@ -67,6 +72,7 @@ export function initRcloneBrowser(onOpen) {
     dialog.addEventListener('keydown', event => event.stopPropagation());
     dialog.addEventListener('mousedown', event => event.stopPropagation());
     let navStack = [], busy = false, generation = 0, hasClips = false, opening = false;
+    let driveDataMode = false;
     let statusKey = 'chooseFolder', statusParams = {}, lastErrorCode = null, returnFocus = button;
     const currentFolder = () => navStack.length > 0 ? navStack[navStack.length - 1].folder : '';
     let pendingOpen = false;
@@ -77,13 +83,14 @@ export function initRcloneBrowser(onOpen) {
     }
     function localize() {
         button.title = t('ui.rclone.entry'); button.setAttribute('aria-label', button.title);
-        title.textContent = t('ui.rclone.title'); help.textContent = t('ui.rclone.description');
+        title.textContent = t(`ui.rclone.${driveDataMode ? 'driveTitle' : 'title'}`);
+        help.textContent = t(`ui.rclone.${driveDataMode ? 'driveDescription' : 'description'}`);
         label.textContent = t('ui.rclone.remoteLabel'); refresh.textContent = t('ui.rclone.refresh');
         manage.textContent = t('ui.rclone.manageConnections') || 'Manage Connections';
-        up.textContent = t('ui.rclone.up'); open.textContent = t('ui.rclone.open');
+        up.textContent = t('ui.rclone.up'); open.textContent = t(`ui.rclone.${driveDataMode ? 'driveOpen' : 'open'}`);
         close.textContent = t(`ui.rclone.${busy ? 'cancel' : 'close'}`);
         headerClose.setAttribute('aria-label', t('ui.rclone.close'));
-        safety.textContent = t('ui.rclone.safety'); summary.textContent = t('ui.rclone.errorDetails');
+        safety.textContent = t(`ui.rclone.${driveDataMode ? 'driveSafety' : 'safety'}`); summary.textContent = t('ui.rclone.errorDetails');
         authAction.textContent = t('ui.rclone.reconnect') || 'Reconnect';
         if (lastErrorCode === 'RATE_LIMIT') {
             status.textContent = getRcloneErrorMessage({ code: 'RATE_LIMIT' });
@@ -96,7 +103,7 @@ export function initRcloneBrowser(onOpen) {
         select.disabled = busy || !select.value; refresh.disabled = busy; manage.disabled = busy;
         up.disabled = busy || navStack.length === 0; open.disabled = busy || !hasClips;
         for (const item of list.querySelectorAll('button')) item.disabled = busy;
-        button.disabled = busy; close.disabled = headerClose.disabled = opening;
+        button.disabled = busy; close.disabled = headerClose.disabled = opening && !driveDataMode;
         dialog.setAttribute('aria-busy', String(busy));
         close.textContent = t(`ui.rclone.${busy ? 'cancel' : 'close'}`);
     }
@@ -146,7 +153,7 @@ export function initRcloneBrowser(onOpen) {
         }
 
         for (const entry of entries) {
-            if (!entry.isDirectory && !entry.playable) continue;
+            if (!entry.isDirectory && !(driveDataMode ? entry.name.toLowerCase() === 'drive-data.json' : entry.playable)) continue;
             const row = make(entry.isDirectory ? 'button' : 'div', 'rclone-row');
             if (entry.isDirectory) {
                 const isDuplicate = (dirCounts.get(entry.name) || 0) > 1;
@@ -180,7 +187,7 @@ export function initRcloneBrowser(onOpen) {
             list.append(row);
         }
         hasClips = count > 0;
-        setStatus(hasClips ? 'ready' : list.children.length ? 'chooseFolder' : 'emptyFolder', hasClips ? 'ready' : '', { count });
+        setStatus(hasClips ? (driveDataMode ? 'driveReady' : 'ready') : driveDataMode ? 'driveChooseFolder' : list.children.length ? 'chooseFolder' : 'emptyFolder', hasClips ? 'ready' : '', { count });
     }
     async function load(active) {
         hasClips = false; list.replaceChildren(); select.replaceChildren(); location.textContent = '';
@@ -221,12 +228,16 @@ export function initRcloneBrowser(onOpen) {
     }
     manage.onclick = () => openSettings(false);
     authAction.onclick = () => openSettings(true);
-    button.onclick = () => {
+    function showPicker(mode = false) {
         if (dialog.open || busy) return;
+        driveDataMode = mode;
+        localize();
         returnFocus = document.activeElement || button;
         navStack.length = 0;
         dialog.showModal(); run(load, 'findingRemotes');
-    };
+    }
+    button.onclick = () => showPicker();
+    openDriveDataPicker = () => showPicker(true);
     refresh.onclick = () => {
         if (busy) return;
         navStack.length = 0;
@@ -245,34 +256,43 @@ export function initRcloneBrowser(onOpen) {
     open.onclick = () => {
         if (!hasClips || opening) return;
         run(async active => {
+            const requestGeneration = generation;
             pendingOpen = true;
             let result;
-            try { result = await unwrap(api.rcloneOpen(select.value, currentFolder())); }
-            finally { pendingOpen = false; }
+            try { result = await unwrap(driveDataMode ? api.rcloneOpenDriveData(select.value, currentFolder()) : api.rcloneOpen(select.value, currentFolder())); }
+            finally { if (requestGeneration === generation) pendingOpen = false; }
             if (!active()) return;
-            opening = true; controls(); setStatus('preparing', 'loading');
+            opening = true; controls(); setStatus(driveDataMode ? 'driveLoading' : 'preparing', 'loading');
             try {
-                await onOpen(result);
+                if (driveDataMode) {
+                    const loaded = await window._loadSentryUsbData(result.path);
+                    if (!active()) return;
+                    if (!loaded?.success) throw new Error(loaded?.error || t('ui.rclone.driveLoadError'));
+                } else {
+                    await onOpen(result);
+                }
                 if (active()) dialog.close();
             } catch (error) {
-                await api.rcloneCancel?.(true);
+                if (active()) await (driveDataMode ? api.rcloneCancel?.() : api.rcloneCancel?.(true));
                 throw error;
-            } finally { opening = false; controls(); }
+            } finally { if (requestGeneration === generation) { opening = false; controls(); } }
         }, 'openingStream');
     };
     async function cancel() {
-        if (opening) return;
-        ++generation; busy = false; dialog.close(); controls();
+        if (opening && !driveDataMode) return;
+        const cancelStream = pendingOpen || (opening && driveDataMode);
+        ++generation; busy = false; opening = false; pendingOpen = false; dialog.close(); controls();
         try {
-            if (pendingOpen && api.rcloneCancel) await api.rcloneCancel();
+            if (cancelStream && api.rcloneCancel) await api.rcloneCancel();
         } catch (_) {}
     }
     close.onclick = headerClose.onclick = cancel;
     dialog.addEventListener('cancel', event => { event.preventDefault(); cancel(); });
     dialog.addEventListener('close', () => { returnFocus?.focus(); });
 
-    registerRcloneBrowserOpener((remoteName) => {
+    registerRcloneBrowserOpener((remoteName, mode = false) => {
         if (dialog.open || busy) return;
+        driveDataMode = mode; localize();
         returnFocus = button;
         navStack.length = 0;
         dialog.showModal();

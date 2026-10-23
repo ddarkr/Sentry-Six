@@ -44,6 +44,7 @@ function setup() {
     rcloneRemotes: jest.fn(async () => ({ ok: true, data: ['fixture'] })),
     rcloneList: jest.fn(async () => ({ ok: true, data: [{ name: '2026-10-09_12-30-00-front.mp4', size: 4, playable: true }] })),
     rcloneOpen: jest.fn(),
+    rcloneOpenDriveData: jest.fn(async () => ({ ok: true, data: { path: 'managed-drive-url', size: 100 } })),
     rcloneCancel: jest.fn(async () => ({ ok: true, data: null }))
   };
   const translationsContext = vm.createContext({});
@@ -54,9 +55,10 @@ function setup() {
   };
   const openSettingsModal = jest.fn();
   const registerRcloneBrowserOpener = jest.fn();
+  const loadDriveData = jest.fn(async () => ({ success: true }));
   const context = vm.createContext({
     document,
-    window: { electronAPI: api },
+    window: { electronAPI: api, _loadSentryUsbData: loadDriveData },
     Set,
     URL,
     Map,
@@ -87,7 +89,7 @@ function setup() {
     up: 'rcloneUp', location: 'rcloneLocation', status: 'rcloneStatus', authAction: 'rcloneAuthAction',
     list: 'rcloneList', open: 'rcloneDownload', close: 'rcloneClose', details: 'rcloneErrorDetails'
   };
-  return { context, document, api, button, openSettingsModal, registerRcloneBrowserOpener, ...Object.fromEntries(Object.entries(ids).map(([name, id]) => [name, document.getElementById(id)])), onOpen };
+  return { context, document, api, button, loadDriveData, openSettingsModal, registerRcloneBrowserOpener, ...Object.fromEntries(Object.entries(ids).map(([name, id]) => [name, document.getElementById(id)])), onOpen };
 }
 test('browses and hands the stream manifest to playback exactly once', async () => {
   const ui = setup();
@@ -340,4 +342,107 @@ test('remote change resets root navigation', async () => {
 
   expect(ui.api.rcloneList).toHaveBeenLastCalledWith('drive-b', '');
   expect(ui.up.disabled).toBe(true);
+});
+
+test('drive picker lists only drive-data.json and loads it without replacing playback', async () => {
+  const ui = setup();
+  ui.api.rcloneList.mockResolvedValue({ ok: true, data: [
+    { name: 'clip.mp4', playable: true }, { name: 'other.json' },
+    { name: 'DRIVE-DATA.JSON', size: 100 }, { name: 'Trips', isDirectory: true, folder: 'trips-ref' }
+  ] });
+  ui.context.openRcloneDriveDataBrowser(); await flush();
+  expect(ui.list.children).toHaveLength(2);
+  expect(ui.open.disabled).toBe(false);
+  ui.open.onclick(); await flush();
+  expect(ui.api.rcloneOpenDriveData).toHaveBeenCalledWith('fixture', '');
+  expect(ui.loadDriveData).toHaveBeenCalledWith('managed-drive-url');
+  expect(ui.api.rcloneOpen).not.toHaveBeenCalled();
+  expect(ui.onOpen).not.toHaveBeenCalled();
+  expect(ui.dialog.open).toBe(false);
+});
+
+test('drive picker requires drive-data.json, including when recordings exist', async () => {
+  const ui = setup();
+  ui.context.openRcloneDriveDataBrowser(); await flush();
+  expect(ui.list.children).toHaveLength(0);
+  expect(ui.open.disabled).toBe(true);
+});
+
+test('failed drive parse reports error and allows retry without revoking video', async () => {
+  const ui = setup();
+  ui.api.rcloneList.mockResolvedValue({ ok: true, data: [{ name: 'drive-data.json', size: 100 }] });
+  ui.loadDriveData.mockResolvedValueOnce({ success: false, error: 'Invalid JSON' });
+  ui.context.openRcloneDriveDataBrowser(); await flush(); ui.open.onclick(); await flush();
+  expect(ui.dialog.open).toBe(true);
+  expect(ui.details.hidden).toBe(false);
+  expect(ui.open.disabled).toBe(false);
+  expect(ui.api.rcloneCancel).toHaveBeenCalledWith();
+  expect(ui.api.rcloneCancel).not.toHaveBeenCalledWith(true);
+  ui.open.onclick(); await flush();
+  expect(ui.dialog.open).toBe(false);
+  expect(ui.loadDriveData).toHaveBeenCalledTimes(2);
+});
+
+test('cancelling drive parse closes its stream and stale completion leaves retry untouched', async () => {
+  const ui = setup(); let finish;
+  ui.api.rcloneList.mockResolvedValue({ ok: true, data: [{ name: 'drive-data.json', size: 100 }] });
+  ui.loadDriveData.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  ui.context.openRcloneDriveDataBrowser(); await flush(); ui.open.onclick(); await flush();
+  expect(ui.close.disabled).toBe(false);
+  ui.close.onclick(); await flush();
+  expect(ui.dialog.open).toBe(false);
+  expect(ui.api.rcloneCancel).toHaveBeenCalledWith();
+  ui.context.openRcloneDriveDataBrowser(); await flush();
+  finish({ success: false, error: 'Cancelled' }); await flush();
+  expect(ui.dialog.open).toBe(true);
+  expect(ui.details.hidden).toBe(true);
+  expect(ui.open.disabled).toBe(false);
+  expect(ui.api.rcloneCancel).toHaveBeenCalledTimes(1);
+  ui.open.onclick(); await flush();
+  expect(ui.dialog.open).toBe(false);
+  expect(ui.onOpen).not.toHaveBeenCalled();
+});
+
+test('drive mode survives connection settings and resets for recordings entry', async () => {
+  const ui = setup();
+  ui.api.rcloneList.mockResolvedValue({ ok: true, data: [{ name: 'drive-data.json', size: 100 }] });
+  ui.registerRcloneBrowserOpener.mock.calls[0][0](null, true); await flush();
+  ui.manage.onclick(); await flush();
+  ui.openSettingsModal.mock.calls[0][2].onReturn('fixture'); await flush();
+  expect(ui.open.disabled).toBe(false);
+  ui.open.onclick(); await flush();
+  expect(ui.loadDriveData).toHaveBeenCalledTimes(1);
+  ui.button.onclick(); await flush();
+  expect(ui.open.disabled).toBe(true);
+});
+
+test('cancelling drive source open never starts its late parse or releases video', async () => {
+  const ui = setup(); let finish;
+  ui.api.rcloneList.mockResolvedValue({ ok: true, data: [{ name: 'drive-data.json', size: 100 }] });
+  ui.api.rcloneOpenDriveData.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  ui.context.openRcloneDriveDataBrowser(); await flush(); ui.open.onclick();
+  ui.dialog.listeners.cancel({ preventDefault() {} });
+  finish({ ok: true, data: { path: 'expired-drive-url' } }); await flush();
+  expect(ui.loadDriveData).not.toHaveBeenCalled();
+  expect(ui.api.rcloneCancel).toHaveBeenCalledWith();
+  expect(ui.dialog.open).toBe(false);
+  ui.context.openRcloneDriveDataBrowser(); await flush(); ui.open.onclick(); await flush();
+  expect(ui.loadDriveData).toHaveBeenCalledWith('managed-drive-url');
+  expect(ui.onOpen).not.toHaveBeenCalled();
+});
+
+test('a directory named drive-data.json remains navigable and cannot be loaded as a file', async () => {
+  const ui = setup();
+  ui.api.rcloneList.mockResolvedValueOnce({ ok: true, data: [
+    { name: 'drive-data.json', isDirectory: true, folder: 'drive-directory-ref' }
+  ] }).mockResolvedValueOnce({ ok: true, data: [{ name: 'drive-data.json', size: 100 }] });
+  ui.context.openRcloneDriveDataBrowser(); await flush();
+  expect(ui.open.disabled).toBe(true);
+  const folder = ui.list.querySelectorAll('button')[0];
+  expect(folder).toBeDefined();
+  folder.onclick(); await flush();
+  expect(ui.api.rcloneList).toHaveBeenLastCalledWith('fixture', 'drive-directory-ref');
+  expect(ui.open.disabled).toBe(false);
+  ui.open.onclick(); await flush();
+  expect(ui.api.rcloneOpenDriveData).toHaveBeenCalledWith('fixture', 'drive-directory-ref');
 });

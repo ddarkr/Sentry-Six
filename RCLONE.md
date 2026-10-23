@@ -52,6 +52,22 @@ SentryClips/YYYY-MM-DD_HH-MM-SS and SavedClips/YYYY-MM-DD_HH-MM-SS wrappers,
 event.json, event.png and thumb.png are retained. Other folders load as loose
 clips; event categories and event metadata are not inferred for arbitrary paths.
 
+## Remote SentryUSB drive data
+
+In **Drives**, choose **Open remote drive-data.json**, then browse to the folder
+containing that file and select **Load drive data**. The same action under
+**Settings → Storage** lets you replace loaded data; the local file picker remains
+available. A folder named `drive-data.json` is navigable like any other folder:
+open it to select the file inside.
+
+The file streams through a separate read-only rclone session into the existing
+worker parser, without a downloaded temporary JSON file or whole-response string.
+Grouping still reads the complete JSON and retains route data in memory; this is
+not on-demand loading of individual drives. Loading or cancelling drive data
+does not replace the current video source. Malformed or interrupted loads do not
+replace previously loaded drives. Remote selections last for this app session
+only; capability URLs are not saved in preferences.
+
 ## Connection settings
 
 Existing remotes appear without registration. A listed remote starts unchecked;
@@ -157,9 +173,19 @@ stop it. Browser sign-in alone is not reported as a verified connection.
 
 This browser requires rclone on the app computer and an internet connection for
 cloud playback. It does not connect to rclone running on a Raspberry Pi, expose
-an RC endpoint, recursively index a whole archive, or integrate SentryUSB
-drive-data.json. Provider quotas, network latency and bandwidth/egress charges
-still apply. There is no persistent offline playback copy.
+an RC endpoint, or recursively index a whole archive. Provider quotas, network
+latency and bandwidth/egress charges still apply. There is no persistent offline
+playback or drive-data copy.
+
+Remote drive-data verification passed the integrated suite (20 suites / 295
+tests) and syntax checks for the nine changed JavaScript modules. An isolated
+Electron instance loaded a real Google Drive JSON file of 255,792,982 bytes
+through the picker, producing 263 drives and 3,938,798 points; lazy drive-detail
+retrieval also succeeded. Synthetic local-rclone data verified the empty-state
+entry, settings replacement action, displayed routes/tags, cancellation during
+parsing and successful reload. Existing video playback and HTTP range access
+continued after cancellation and replacement, and no remote URL was persisted.
+The running user app was not restarted; packaged builds were not exercised.
 
 The scoped streaming snapshot passed 17 suites / 211 tests. Backend checks with
 the installed rclone CLI opened a local manifest over 3 GiB without downloading

@@ -2780,8 +2780,7 @@ ipcMain.handle('fs:readFile', async (_event, filePath) => {
 // The file can be >1GB (16k+ routes), which exceeds V8's max string length
 // (~512MB), so it is streamed with stream-json.
 //
-// ALL heavy work happens in worker threads (driveLoadWorker.js for
-// routes+grouping, driveTagsWorker.js for tags, concurrently): the parse is
+// Heavy parsing and grouping happen in driveLoadWorker.js with a single parse:
 // CPU-bound for ~2 minutes on a 400MB file, and when it ran on the main
 // process the window couldn't be dragged smoothly the whole time (a busy
 // main process can't pump OS window messages).
@@ -2793,6 +2792,7 @@ ipcMain.handle('fs:readFile', async (_event, filePath) => {
 // Float64Array buffers (zero-copy), stay cached here, and are inflated
 // per-drive via sentryUsb:getDriveDetail when a drive is opened.
 let sentryUsbCache = { filePath: null, mtimeMs: 0, drives: null, routeCount: 0, routesLen: 0 };
+let sentryUsbLoadGeneration = 0;
 
 function makeLightSentryUsbDrives(drives) {
   return drives.map(d => {
@@ -2802,13 +2802,17 @@ function makeLightSentryUsbDrives(drives) {
 }
 
 ipcMain.handle('sentryUsb:loadAndGroup', async (_event, filePath) => {
+  const generation = ++sentryUsbLoadGeneration;
   try {
-    if (!filePath) return { success: false, error: 'No file path provided' };
-    if (!fs.existsSync(filePath)) return { success: false, error: 'File not found: ' + filePath };
+    if (typeof filePath !== 'string' || !filePath) return { success: false, error: 'No file path provided' };
+    const remote = rcloneBrowser?.getDriveDataSource(filePath);
+    if (!remote && /^[a-z][a-z0-9+.-]*:\/\//i.test(filePath)) {
+      return { success: false, error: 'Remote drive data source is no longer available. Select it again.' };
+    }
+    if (!remote && !fs.existsSync(filePath)) return { success: false, error: 'File not found: ' + filePath };
 
-    // Serve from cache when the same unmodified file is requested again
-    // (e.g. a renderer reload) — re-parsing a 400MB+ file takes minutes.
-    const stat = fs.statSync(filePath);
+    // Remote capabilities identify one session; never persist or log their URLs.
+    const stat = remote ? { size: remote.size, mtimeMs: 0 } : fs.statSync(filePath);
     if (sentryUsbCache.drives && sentryUsbCache.filePath === filePath && sentryUsbCache.mtimeMs === stat.mtimeMs) {
       console.log('[SentryUSB] Serving drives from cache (file unchanged)');
       return {
@@ -2823,40 +2827,10 @@ ipcMain.handle('sentryUsb:loadAndGroup', async (_event, filePath) => {
 
     const { Worker } = require('worker_threads');
     const fileSize = stat.size;
-    console.log(`[SentryUSB] Stream-parsing ${filePath} (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
+    console.log(`[SentryUSB] Stream-parsing ${remote ? 'remote drive-data.json' : filePath} (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
     const t0 = Date.now();
 
-    // Parse drive tags concurrently on another core. Tags are cosmetic —
-    // any worker failure resolves to {} instead of failing the load.
-    const tagsPromise = new Promise((resolve) => {
-      try {
-        const worker = new Worker(path.join(__dirname, 'main', 'driveTagsWorker.js'), {
-          workerData: { filePath },
-        });
-        worker.once('message', (msg) => {
-          if (msg?.ok) {
-            console.log(`[SentryUSB] Tags worker: ${Object.keys(msg.driveTags).length} drive tags in ${Date.now() - t0}ms`);
-            resolve(msg.driveTags);
-          } else {
-            console.warn('[SentryUSB] Tags worker failed:', msg?.error);
-            resolve({});
-          }
-        });
-        worker.once('error', (err) => {
-          console.warn('[SentryUSB] Tags worker error:', err?.message || err);
-          resolve({});
-        });
-        // A worker killed without emitting 'message'/'error' (e.g. OOM) must
-        // still resolve, or the load worker waits on the tags forever.
-        worker.once('exit', () => resolve({}));
-      } catch (err) {
-        console.warn('[SentryUSB] Could not start tags worker:', err?.message || err);
-        resolve({});
-      }
-    });
-
-    // Routes parse + grouping in the load worker. The main process only
-    // relays progress logs and forwards the tags result when it arrives.
+    // Routes, tags and grouping share one worker; main only relays progress.
     const result = await new Promise((resolve, reject) => {
       let settled = false;
       let worker;
@@ -2872,7 +2846,7 @@ ipcMain.handle('sentryUsb:loadAndGroup', async (_event, filePath) => {
       };
       try {
         worker = new Worker(path.join(__dirname, 'main', 'driveLoadWorker.js'), {
-          workerData: { filePath },
+          workerData: { filePath, ...(remote ? { remoteSize: remote.size } : {}) },
         });
       } catch (err) { reject(err); return; }
 
@@ -2895,10 +2869,10 @@ ipcMain.handle('sentryUsb:loadAndGroup', async (_event, filePath) => {
       worker.on('error', (err) => done(reject, err));
       worker.on('exit', (code) => done(reject, new Error('Drive load worker exited early (code ' + code + ')')));
 
-      tagsPromise.then((tags) => {
-        try { worker.postMessage({ type: 'driveTags', driveTags: tags }); } catch {}
-      });
     });
+    if (generation !== sentryUsbLoadGeneration || (remote && !rcloneBrowser?.getDriveDataSource(filePath))) {
+      return { success: false, error: 'Drive data load cancelled or replaced.' };
+    }
 
     console.log(`[SentryUSB] Grouped into ${result.driveCount} drives in ${result.groupMs}ms (total ${Date.now() - t0}ms)`);
 

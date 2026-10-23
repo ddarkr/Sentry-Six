@@ -60,6 +60,78 @@ describe('read-only remote browser', () => {
     const old = b.stream; b.cancel(true); expect(old.closed).toBe(true);
     await expect(b.stageForExport([result.files[0].path])).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
+  test('drive data uses a separate allowlisted session and cancel preserves video', async () => {
+    const [b, spawn] = browser([localRemote, JSON.stringify([entry(filename)]),
+      JSON.stringify([entry('DRIVE-DATA.JSON', 123), entry('ignored.json')]),
+      JSON.stringify([entry('drive-data.json', 456)])]);
+    await b.listRemotes();
+    const video = await b.open('cloud', '');
+    const videoSession = b.stream;
+    const first = await b.openDriveData('cloud', '');
+    expect(first).toEqual({ path: expect.stringContaining('/DRIVE-DATA.JSON'), size: 123,
+      source: { kind: 'rclone', remote: 'cloud', folder: '' } });
+    expect(b.getDriveDataSource(first.path)).toMatchObject({ name: 'DRIVE-DATA.JSON', size: 123 });
+    expect(b.getDriveDataSource(video.files[0].path)).toBeNull();
+    expect(b.getDriveDataSource(first.path + '?forged')).toBeNull();
+    const old = b.driveStream;
+    const second = await b.openDriveData('cloud', '');
+    expect(old.closed).toBe(true);
+    expect(b.getDriveDataSource(first.path)).toBeNull();
+    expect(videoSession.closed).toBe(false);
+    expect(spawn.mock.calls.some(call => call[1][0] === 'cat')).toBe(false);
+    b.cancel();
+    expect(b.getDriveDataSource(second.path)).toBeNull();
+    expect(videoSession.closed).toBe(false);
+    b.dispose();
+    expect(videoSession.closed).toBe(true);
+  });
+  test('drive data deduplicates only checksum and size verified copies', async () => {
+    const hashed = { ...entry('drive-data.json', 123), Hashes: { md5: 'ab'.repeat(16) } };
+    const [b, spawn] = browser([JSON.stringify([{ name: 'cloud', type: 'drive' }]),
+      JSON.stringify([hashed, { ...hashed, Name: 'DRIVE-DATA.JSON', Path: 'DRIVE-DATA.JSON' }])]);
+    await b.listRemotes();
+    await b.openDriveData('cloud', '');
+    expect(b.driveStream.files.size).toBe(1);
+    expect(spawn.mock.calls.find(call => call[1][0] === 'lsjson')[1]).toContain('--hash-type');
+  });
+  test.each([
+    [entry('drive-data.json'), entry('DRIVE-DATA.JSON')],
+    [entry('drive-data.json', -1)],
+    [entry('drive-data.json', 0)],
+    [entry('drive-data.json', 1.5)],
+    [entry('other.json')],
+    [entry('drive-data.json', 4, true)]
+  ])('rejects unsupported or unsafe drive data selections %j', async (...rows) => {
+    const [b] = browser([localRemote, JSON.stringify(rows)]);
+    await b.listRemotes();
+    await expect(b.openDriveData('cloud', '')).rejects.toThrow();
+    expect(b.driveStream).toBeUndefined();
+  });
+  test.each([
+    ['cd'.repeat(16), 123],
+    ['ab'.repeat(16), 124],
+    [undefined, 123]
+  ])('rejects conflicting drive-data checksums or sizes', async (md5, size) => {
+    const original = { ...entry('drive-data.json', 123), Hashes: { md5: 'ab'.repeat(16) } };
+    const duplicate = { ...entry('drive-data.json', size), Hashes: { md5 } };
+    const [b] = browser([JSON.stringify([{ name: 'cloud', type: 'drive' }]),
+      JSON.stringify([original, duplicate])]);
+    await b.listRemotes();
+    await expect(b.openDriveData('cloud', '')).rejects.toMatchObject({ code: 'DUPLICATE_FILES' });
+  });
+  test('cancelling drive selection kills listing and revokes old drive source, not video', async () => {
+    const [b] = browser([localRemote, JSON.stringify([entry(filename)]),
+      JSON.stringify([entry('drive-data.json')]), { hold: true }]);
+    await b.listRemotes();
+    await b.open('cloud', '');
+    const data = await b.openDriveData('cloud', '');
+    const pending = b.openDriveData('cloud', '');
+    expect(b.getDriveDataSource(data.path)).toBeNull();
+    await expect(b.openDriveData('cloud', '')).rejects.toMatchObject({ code: 'BUSY' });
+    b.cancel();
+    await expect(pending).rejects.toMatchObject({ code: 'CANCELLED' });
+    expect(b.stream.closed).toBe(false);
+  });
   test.each([filename, filename.toUpperCase()])('rejects conflicting recording %s only at open', async duplicate => {
     const listing = JSON.stringify([entry(filename), entry(duplicate)]);
     const [b, spawn] = browser([localRemote, listing, listing]);

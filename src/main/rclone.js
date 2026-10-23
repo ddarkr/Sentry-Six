@@ -193,11 +193,34 @@ class RcloneBrowser {
       };
     });
   }
+  openDriveData(remote, folder) {
+    return this.exclusive(async () => {
+      this.driveStream?.close();
+      const candidates = (await this.entries(remote, folder, true))
+        .filter(file => !file.isDirectory && /^drive-data\.json$/i.test(file.name));
+      if (!candidates.length) throw commandError('INVALID_INPUT');
+      const file = candidates[0];
+      for (const candidate of candidates) {
+        if (!Number.isSafeInteger(candidate.size) || candidate.size <= 0) throw commandError('REMOTE_ERROR');
+        if (candidate !== file && (!file.md5 || candidate.md5 !== file.md5 || candidate.size !== file.size)) {
+          throw commandError('DUPLICATE_FILES');
+        }
+      }
+      const session = await streamTransport.start(this, remote, folder, [file]);
+      this.driveStream = session;
+      return { path: session.files.keys().next().value, size: file.size,
+        source: { kind: 'rclone', remote, folder: this.folderContext(remote, folder).parts.join('/') } };
+    });
+  }
+  getDriveDataSource(value) {
+    return !this.driveStream?.closed && this.driveStream?.files.get(value) || null;
+  }
   isStreamPath(value) { return streamTransport.isStreamPath(value); }
   stageForExport(paths, options) { return streamTransport.stage(this, paths, options); }
   cancel(release = false) {
     this.cancelled = true;
     this.pendingStream?.close();
+    this.driveStream?.close();
     if (release || this.closed) this.stream?.close();
     for (const child of this.children) child.kill('SIGKILL');
   }
@@ -214,6 +237,7 @@ class RcloneBrowser {
   }
   cleanup() {
     this.stream?.close();
+    this.driveStream?.close();
     for (const cleanup of [...this.stages]) cleanup();
   }
   dispose() {
@@ -243,6 +267,7 @@ function registerRcloneIpc({ ipcMain, app, getMainWindow, executable = 'rclone' 
   ipcMain.handle('rclone:remotes', invoke(() => browser.listRemotes(), true));
   ipcMain.handle('rclone:list', invoke((remote, folder) => browser.list(remote, folder), true));
   ipcMain.handle('rclone:open', invoke((remote, folder) => browser.open(remote, folder), true));
+  ipcMain.handle('rclone:openDriveData', invoke((remote, folder) => browser.openDriveData(remote, folder), true));
   ipcMain.handle('rclone:cancel', invoke((release = false) => {
     if (typeof release !== 'boolean') throw commandError('INVALID_INPUT');
     if (!config.active) browser.cancel(release);
@@ -250,7 +275,7 @@ function registerRcloneIpc({ ipcMain, app, getMainWindow, executable = 'rclone' 
   }));
   ipcMain.handle('rclone:status', invoke(() => config.status(), true));
   ipcMain.handle('rclone:check', invoke(remote => config.check(remote), true));
-  ipcMain.handle('rclone:configure', invoke(request => { browser.stream?.close(); return config.configure(request); }, true));
+  ipcMain.handle('rclone:configure', invoke(request => { browser.stream?.close(); browser.driveStream?.close(); return config.configure(request); }, true));
   ipcMain.handle('rclone:configContinue', invoke(request => config.continue(request)));
   ipcMain.handle('rclone:configCancel', invoke(() => config.cancel()));
   ipcMain.handle('rclone:chooseExecutable', invoke(async () => {
@@ -265,6 +290,7 @@ function registerRcloneIpc({ ipcMain, app, getMainWindow, executable = 'rclone' 
       if (!(await fs.promises.stat(selected)).isFile()) throw commandError('INVALID_INPUT');
       await fs.promises.access(selected, process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK);
       browser.stream?.close();
+      browser.driveStream?.close();
       browser.executable = selected;
       const status = await config.status();
       if (!status.installed) throw commandError('NOT_INSTALLED');

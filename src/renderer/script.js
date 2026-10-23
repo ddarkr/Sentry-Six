@@ -1756,6 +1756,7 @@ setTimeout(loadDefaultFolderOnStartup, 500);
 // settings file picker firing while the startup auto-load is still streaming a
 // large drive-data.json) so we don't pile up parallel reads of a 1GB file.
 const _inFlightSentryUsbLoads = new Map();
+let sentryUsbLoadGeneration = 0;
 
 /**
  * Load and parse a SentryUSB drive-data.json file.
@@ -1763,7 +1764,7 @@ const _inFlightSentryUsbLoads = new Map();
  * receives only the final small `drives` array. This handles files that exceed
  * V8's max string length (~512MB), which a renderer-side fs:readFile + JSON.parse
  * cannot.
- * @param {string} filePath - Absolute path to drive-data.json
+ * @param {string} filePath - Local file path or managed rclone drive-data URL
  * @returns {Promise<{success: boolean, driveCount?: number, routeCount?: number, error?: string}>}
  */
 async function loadSentryUsbData(filePath) {
@@ -1772,11 +1773,12 @@ async function loadSentryUsbData(filePath) {
     // If the same file is already being loaded, return that promise instead of
     // kicking off a second parallel parse of a potentially 1GB file.
     if (_inFlightSentryUsbLoads.has(filePath)) {
-        console.log('[SentryUSB] Load already in flight for', filePath, '— reusing promise');
+        console.log('[SentryUSB] Load already in flight — reusing promise');
         return _inFlightSentryUsbLoads.get(filePath);
     }
 
     const sentryUsb = state.sentryUsb;
+    const generation = ++sentryUsbLoadGeneration;
     sentryUsb.loading = true;
     // Reflect the loading state in the Drives tab so the user sees something
     // is happening instead of the "No drive data loaded" placeholder.
@@ -1785,6 +1787,7 @@ async function loadSentryUsbData(filePath) {
     const promise = (async () => {
         try {
             const result = await window.electronAPI.loadSentryUsbDrives(filePath);
+            if (generation !== sentryUsbLoadGeneration) return { success: false, error: 'Drive data load replaced or cleared.' };
             if (!result?.success) {
                 const err = result?.error || 'Unknown load error';
                 console.error('[SentryUSB] Failed to load drive data:', err);
@@ -1818,12 +1821,12 @@ async function loadSentryUsbData(filePath) {
             console.error('[SentryUSB] Failed to load drive data:', err);
             return { success: false, error: err?.message || String(err) };
         } finally {
-            sentryUsb.loading = false;
             _inFlightSentryUsbLoads.delete(filePath);
-            // Always refresh the Drives tab and badge after the load settles so
-            // success → drive list, failure → empty placeholder.
-            try { updateDrivesTabVisibility(); } catch {}
-            try { renderDriveList(); } catch {}
+            if (generation === sentryUsbLoadGeneration) {
+                sentryUsb.loading = false;
+                try { updateDrivesTabVisibility(); } catch {}
+                try { renderDriveList(); } catch {}
+            }
         }
     })();
     _inFlightSentryUsbLoads.set(filePath, promise);
@@ -1835,6 +1838,8 @@ async function loadSentryUsbData(filePath) {
  */
 function clearSentryUsbData() {
     const sentryUsb = state.sentryUsb;
+    ++sentryUsbLoadGeneration;
+    sentryUsb.loading = false;
     sentryUsb.drives = [];
     sentryUsb.hasFootage = new Set();
     sentryUsb.loaded = false;

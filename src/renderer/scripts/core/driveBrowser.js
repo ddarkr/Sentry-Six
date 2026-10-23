@@ -5,6 +5,8 @@
 
 import { escapeHtml } from '../lib/utils.js';
 import { formatDriveDistance } from './driveGrouper.js';
+import { t } from '../lib/i18n.js';
+import { openRcloneDriveDataBrowser } from '../features/rcloneBrowser.js';
 
 // Injected dependencies
 let getState = null;
@@ -59,8 +61,11 @@ export function renderDriveList() {
                 <p class="drive-no-data-title">No drive data loaded</p>
                 <p class="drive-no-data-desc">SentryUSB Drive Data shows your full driving history with GPS routes, speed, and FSD stats. Requires a SentryUSB <code>drive-data.json</code> file.</p>
                 <button class="btn btn-secondary btn-small drive-select-file-btn" onclick="document.getElementById('browseDriveDataFileBtn')?.click()">Select drive-data.json</button>
+                ${window.electronAPI?.rcloneOpenDriveData ? `<button class="btn btn-secondary btn-small drive-remote-file-btn">${escapeHtml(t('ui.rclone.driveEntry'))}</button>` : ''}
                 <a href="https://sentry-six.com/sentry-usb" target="_blank" class="drive-learn-more-link">Learn more about SentryUSB</a>
             </div>`;
+        const remoteButton = driveList.querySelector('.drive-remote-file-btn');
+        if (remoteButton) remoteButton.onclick = openRcloneDriveDataBrowser;
         return;
     }
 

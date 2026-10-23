@@ -16,6 +16,13 @@ export const translations = {
                 cameras: "Cameras: {cameras}"
             },
             rclone: {
+                driveEntry: "Open remote drive-data.json", driveTitle: "Remote drive data",
+                driveDescription: "Choose a folder containing drive-data.json to stream your driving history.",
+                driveOpen: "Load drive data", driveReady: "drive-data.json is ready to load.",
+                driveChooseFolder: "Choose a folder containing drive-data.json.",
+                driveLoading: "Streaming and grouping drive data…",
+                driveSafety: "Your current video playback will not be replaced.",
+                driveLoadError: "Could not load drive data.",
                 entry: "Remote folders", title: "Remote folders",
                 description: "Stream a recording folder from the cloud without downloading it all first.",
                 remoteLabel: "Storage", refresh: "Refresh", up: "Parent folder",
@@ -469,6 +476,13 @@ export const translations = {
                 cameras: "카메라: {cameras}"
             },
             rclone: {
+                driveEntry: "원격 drive-data.json 열기", driveTitle: "원격 주행 데이터",
+                driveDescription: "drive-data.json이 있는 폴더를 선택해 주행 기록을 스트리밍합니다.",
+                driveOpen: "주행 데이터 불러오기", driveReady: "drive-data.json을 불러올 수 있습니다.",
+                driveChooseFolder: "drive-data.json이 있는 폴더를 선택하세요.",
+                driveLoading: "주행 데이터를 스트리밍하고 경로를 정리하는 중…",
+                driveSafety: "현재 재생 중인 영상은 바뀌지 않습니다.",
+                driveLoadError: "주행 데이터를 불러오지 못했습니다.",
                 entry: "원격 폴더", title: "원격 폴더",
                 description: "폴더 전체를 먼저 내려받지 않고 클라우드 녹화를 스트리밍합니다.",
                 remoteLabel: "저장소", refresh: "새로고침", up: "상위 폴더",
