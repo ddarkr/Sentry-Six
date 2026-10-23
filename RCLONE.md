@@ -28,6 +28,10 @@ the minimum contiguous media time available at the current position across
 the active cameras, not download progress or a network-speed estimate. Gaps,
 missing camera files and previous sources are not counted. The indicator resets
 on source changes and is hidden for local playback.
+Light gray regions on the seek bar show the buffered intervals shared by all
+active cameras, positioned within the full collection timeline. Unbuffered gaps
+stay dark. Only buffers still held by the current media elements are shown;
+switching segments or sources clears the previous regions.
 
 Export stages only the original files needed for the selected range and cameras
 in a private temporary directory, then removes them after success, cancellation
