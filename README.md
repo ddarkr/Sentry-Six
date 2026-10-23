@@ -52,7 +52,7 @@ Not affiliated with Tesla, Inc. Unrelated to the Sentry (sentry.io) error-monito
   - GPS Map with route visualization
     - See the path your car took during the clip
     - Route line changes color based on driving state (Blue for Self Driving, Gray for Manual)
-    - Zoom in/out and pan around the map (right-click drag to pan)
+    - Zoom in/out and pan around the map (right-click drag follows the pointer in both north-up and heading-up modes, including rotation transitions)
   - Choose between default and compact dashboard layouts
   - *Requirements for SEI Telemetry*
     - *2025.44.25 or newer*
@@ -142,6 +142,8 @@ Join our [Discord Server](https://discord.com/invite/9QZEzVwdnt)!
 3. Open a new Terminal (Command Prompt or Power Shell) and head to the Sentry Studio folder `cd C:\users\yourname\downloads\Sentry-Studio`
 4. In your Sentry Studio folder, use the following command: `npm install`
 6. To run Sentry Studio, use `npm start`
+
+Run `node_modules/.bin/electron tests/renderer/mapPanning.smoke.cjs` for the isolated, hidden-window Leaflet drag check. It verifies both orientation modes at five headings, a mode transition, and mouse release using the production pan handlers.
 
 ## Usage
 

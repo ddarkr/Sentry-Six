@@ -31,7 +31,7 @@ import { initDraggablePanels, resetPanelPosition } from './scripts/ui/draggableP
 import { initAdvancedEditor, openAdvancedEditor } from './scripts/ui/advancedEditor/index.js';
 import { initEventMarkers, updateEventTimelineMarker, updateEventCameraHighlight } from './scripts/ui/eventMarkers.js';
 import { initSkipSeconds, skipSeconds } from './scripts/features/skipSeconds.js';
-import { initMapVisualization, updateMapVisibility, updateMapMarker, clearMapMarker, getMapOrientation, setMapOrientation, getMapBearing } from './scripts/ui/mapVisualization.js';
+import { initMapVisualization, updateMapVisibility, updateMapMarker, clearMapMarker, getMapOrientation, setMapOrientation } from './scripts/ui/mapVisualization.js';
 import { attachTileLayer } from './scripts/ui/mapTiles.js';
 import { initDashboardVisibility, updateDashboardVisibility } from './scripts/ui/dashboardVisibility.js';
 import { hasValidGps, extractSeiFromEntry, findSeiAtTime } from './scripts/core/seiExtractor.js';
@@ -509,23 +509,14 @@ let useMetric = false; // Will be loaded from settings
                 if (isMapDragging && mapDragStart && mapDragStartCenter) {
                     e.preventDefault();
                     e.stopPropagation();
-                    let dx = e.clientX - mapDragStart.x;
-                    let dy = e.clientY - mapDragStart.y;
-                    // Counter-rotate drag vector by map bearing so drag direction
-                    // matches screen direction even when the map container is rotated
-                    const bearing = getMapBearing();
-                    if (bearing) {
-                        const rad = (bearing * Math.PI) / 180;
-                        const cos = Math.cos(rad);
-                        const sin = Math.sin(rad);
-                        const rdx = dx * cos + dy * sin;
-                        const rdy = -dx * sin + dy * cos;
-                        dx = rdx;
-                        dy = rdy;
-                    }
+                    // Use the rendered transform, including scale and in-flight rotation.
+                    const transform = new DOMMatrix(getComputedStyle(mapEl).transform);
+                    const delta = new DOMPoint(
+                        e.clientX - mapDragStart.x, e.clientY - mapDragStart.y, 0, 0
+                    ).matrixTransform(transform.inverse());
                     // Convert pixel offset to lat/lng offset
                     const startPoint = map.latLngToContainerPoint(mapDragStartCenter);
-                    const newPoint = L.point(startPoint.x - dx, startPoint.y - dy);
+                    const newPoint = L.point(startPoint.x - delta.x, startPoint.y - delta.y);
                     const newCenter = map.containerPointToLatLng(newPoint);
                     map.setView(newCenter, map.getZoom(), { animate: false });
                 }

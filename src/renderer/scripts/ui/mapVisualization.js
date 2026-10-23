@@ -29,14 +29,6 @@ export function getMapOrientation() {
 }
 
 /**
- * Get current map bearing (degrees the container is rotated)
- * @returns {number}
- */
-export function getMapBearing() {
-    return mapOrientation === 'heading-up' ? currentMapBearing : 0;
-}
-
-/**
  * Set map orientation mode
  * @param {'heading-up'|'north-up'} mode
  */
