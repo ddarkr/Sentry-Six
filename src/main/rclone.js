@@ -268,10 +268,12 @@ function registerRcloneIpc({ ipcMain, app, getMainWindow, executable = 'rclone' 
   ipcMain.handle('rclone:list', invoke((remote, folder) => browser.list(remote, folder), true));
   ipcMain.handle('rclone:open', invoke((remote, folder) => browser.open(remote, folder), true));
   ipcMain.handle('rclone:openDriveData', invoke((remote, folder) => browser.openDriveData(remote, folder), true));
-  ipcMain.handle('rclone:cancel', invoke((release = false) => {
+  ipcMain.handle('rclone:cancel', invoke(async (release = false) => {
     if (typeof release !== 'boolean') throw commandError('INVALID_INPUT');
-    if (!config.active) browser.cancel(release);
-    else if (release) browser.stream?.close();
+    if (!config.active) {
+      browser.cancel(release);
+      await browser.idle;
+    } else if (release) browser.stream?.close();
   }));
   ipcMain.handle('rclone:status', invoke(() => config.status(), true));
   ipcMain.handle('rclone:check', invoke(remote => config.check(remote), true));

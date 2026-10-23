@@ -75,7 +75,6 @@ export function initRcloneBrowser(onOpen) {
     let driveDataMode = false;
     let statusKey = 'chooseFolder', statusParams = {}, lastErrorCode = null, returnFocus = button;
     const currentFolder = () => navStack.length > 0 ? navStack[navStack.length - 1].folder : '';
-    let pendingOpen = false;
     function setStatus(key, state = '', params = {}) {
         statusKey = key; statusParams = params; lastErrorCode = null;
         status.textContent = t(`ui.rclone.${key}`, params);
@@ -257,10 +256,7 @@ export function initRcloneBrowser(onOpen) {
         if (!hasClips || opening) return;
         run(async active => {
             const requestGeneration = generation;
-            pendingOpen = true;
-            let result;
-            try { result = await unwrap(driveDataMode ? api.rcloneOpenDriveData(select.value, currentFolder()) : api.rcloneOpen(select.value, currentFolder())); }
-            finally { if (requestGeneration === generation) pendingOpen = false; }
+            const result = await unwrap(driveDataMode ? api.rcloneOpenDriveData(select.value, currentFolder()) : api.rcloneOpen(select.value, currentFolder()));
             if (!active()) return;
             opening = true; controls(); setStatus(driveDataMode ? 'driveLoading' : 'preparing', 'loading');
             try {
@@ -279,12 +275,15 @@ export function initRcloneBrowser(onOpen) {
         }, 'openingStream');
     };
     async function cancel() {
-        if (opening && !driveDataMode) return;
-        const cancelStream = pendingOpen || (opening && driveDataMode);
-        ++generation; busy = false; opening = false; pendingOpen = false; dialog.close(); controls();
+        if (!dialog.open || (opening && !driveDataMode)) return;
+        const cancelling = busy;
+        ++generation; opening = false; dialog.close(); controls();
         try {
-            if (cancelStream && api.rcloneCancel) await api.rcloneCancel();
-        } catch (_) {}
+            if (cancelling && api.rcloneCancel) await api.rcloneCancel();
+        } catch (_) {
+        } finally {
+            busy = false; controls(); returnFocus?.focus();
+        }
     }
     close.onclick = headerClose.onclick = cancel;
     dialog.addEventListener('cancel', event => { event.preventDefault(); cancel(); });

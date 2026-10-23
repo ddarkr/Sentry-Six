@@ -308,6 +308,26 @@ describe('read-only remote browser', () => {
       await expect(handler({ sender: webContents, senderFrame: {} })).rejects.toThrow('Untrusted');
     }
   });
+  test.each([false, true])('cancel IPC completes only after the listing lock releases (release=%s)', async release => {
+    const handlers = {};
+    const frame = { url: require('url').pathToFileURL(path.resolve(__dirname, '../../src/renderer/index.html')).href };
+    const webContents = { mainFrame: frame };
+    const b = registerRcloneIpc({ ipcMain: { handle: (name, handler) => { handlers[name] = handler; } },
+      app: { getPath: () => temp, on: jest.fn() }, getMainWindow: () => ({ webContents }) });
+    browsers.push(b);
+    b.spawn = fakeCli([localRemote, JSON.stringify([entry(filename)]), { hold: true }, localRemote]);
+    const event = { sender: webContents, senderFrame: frame };
+    await handlers['rclone:remotes'](event);
+    await handlers['rclone:open'](event, 'cloud', '');
+    const playing = b.stream;
+    const listing = handlers['rclone:list'](event, 'cloud', '');
+    await expect(handlers['rclone:cancel'](event, release)).resolves.toMatchObject({ ok: true });
+    expect(b.busy).toBe(false);
+    expect(b.children.size).toBe(0);
+    expect(playing.closed).toBe(release);
+    await expect(listing).resolves.toMatchObject({ ok: false, error: { code: 'CANCELLED' } });
+    await expect(handlers['rclone:remotes'](event)).resolves.toEqual({ ok: true, data: ['cloud'] });
+  });
   test('trusted IPC returns actionable error codes without backend diagnostics', async () => {
     const handlers = {};
     const frame = { url: require('url').pathToFileURL(path.resolve(__dirname, '../../src/renderer/index.html')).href };

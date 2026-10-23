@@ -42,6 +42,9 @@ complete original segment; the limit is not the encoded output size.
 The centered picker follows the app language and keeps long paths and file lists
 inside the window. Errors show a short message with expandable details; refresh
 retries the remote list. Escape or **Close** dismisses the picker and returns focus.
+Cancellation also stops an in-flight remote or folder listing. Reopening stays
+disabled until that rclone operation finishes releasing its lock; an existing
+recording playback stream remains available.
 
 Google Drive folders are selected by their IDs, not by their names. Same-name
 folders remain separate rows with ID suffixes, and Parent follows the selected

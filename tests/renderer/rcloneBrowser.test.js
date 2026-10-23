@@ -176,6 +176,33 @@ test('late directory listing after Escape stays dismissed and retry works', asyn
   expect(ui.list.children).toHaveLength(0); expect(ui.dialog.open).toBe(false);
   ui.button.onclick(); await flush(); expect(ui.dialog.open).toBe(true); expect(ui.open.disabled).toBe(false);
 });
+
+test.each(['rcloneRemotes', 'rcloneList'])('cancelling %s blocks reopen until cancellation finishes', async method => {
+  const ui = setup();
+  let finishListing, finishCancel;
+  ui.api[method].mockReturnValueOnce(new Promise(resolve => { finishListing = resolve; }));
+  ui.api.rcloneCancel.mockReturnValueOnce(new Promise(resolve => { finishCancel = resolve; }));
+  ui.button.onclick(); await flush();
+  const cancelled = ui.close.onclick();
+  expect(ui.dialog.open).toBe(false);
+  expect(ui.button.disabled).toBe(true);
+  expect(ui.api.rcloneCancel).toHaveBeenCalledWith();
+  ui.button.onclick();
+  expect(ui.dialog.open).toBe(false);
+  await ui.close.onclick(); // A second dismissal must not unlock the pending cancellation.
+  expect(ui.button.disabled).toBe(true);
+  finishListing({ ok: false, error: { code: 'CANCELLED', message: 'Cancelled' } });
+  await flush();
+  expect(ui.button.disabled).toBe(true);
+  finishCancel({ ok: true, data: null });
+  await cancelled;
+  expect(ui.button.disabled).toBe(false);
+  expect(ui.document.activeElement).toBe(ui.button);
+  ui.button.onclick(); await flush();
+  expect(ui.dialog.open).toBe(true);
+  expect(ui.open.disabled).toBe(false);
+  expect(ui.details.hidden).toBe(true);
+});
 test('failure is shown and leaves retry available; dialog isolates global shortcuts', async () => {
   const ui = setup(); ui.api.rcloneRemotes.mockResolvedValueOnce({ ok: false, error: { code: 'NOT_INSTALLED', message: 'rclone not found' } });
   ui.button.onclick(); await flush(); expect(ui.status.textContent).not.toBe(''); expect(ui.refresh.disabled).toBe(false); expect(ui.open.disabled).toBe(true);
