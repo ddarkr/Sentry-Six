@@ -62,6 +62,7 @@ Not affiliated with Tesla, Inc. Unrelated to the Sentry (sentry.io) error-monito
 
 - **Clip Exporting**
   - Trim clips with ease using in/out points
+  - Selecting one camera fills the layout preview; selecting multiple cameras restores their draggable positions.
   - Hardware-accelerated encoding (NVIDIA, AMD, Intel QuickSync, Apple Silicon)
   - Pick different export qualities
     - Mobile, Medium, High, Maximum

@@ -4249,6 +4249,21 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     transition: box-shadow 0.15s, border-color 0.15s, background 0.15s;
 }
 
+/* Single-camera exports crop to that camera. Match the preview without
+   changing the stored multi-camera positions or export geometry. */
+.layout-canvas > .layout-card:only-child {
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    cursor: default;
+    pointer-events: none;
+}
+
+.layout-canvas-container:has(.layout-card:only-child) + .layout-hint {
+    visibility: hidden;
+}
+
 .layout-card:hover {
     background: oklch(0.82 0.18 150 / 0.25);
     border-color: var(--accent-solid-hover);
