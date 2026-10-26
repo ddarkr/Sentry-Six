@@ -1,8 +1,63 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { PNG } = require('pngjs');
 
+// Evaluate the existing shared export boundary without starting Electron.
 const source = fs.readFileSync(path.join(__dirname, '../../src/main.js'), 'utf8');
+const composite = source.slice(source.indexOf('function compositeBlurMasks('), source.indexOf('\nconst {', source.indexOf('function compositeBlurMasks(')));
+const apply = source.slice(source.indexOf('async function applyBlurZonesToStreams('), source.indexOf('// Video Export Implementation'));
+function loadBoundary() {
+  const files = [];
+  const context = { PNG, Buffer, path, os: { tmpdir: () => '/tmp' }, fs: { writeFileSync: jest.fn((name, data) => files.push(data)) }, console: { log() {}, error() {} } };
+  vm.createContext(context);
+  vm.runInContext(`${composite}\n${apply}`, context);
+  return { apply: context.applyBlurZonesToStreams, files, fs: context.fs };
+}
+function zone(overrides = {}) {
+  const png = new PNG({ width: 2, height: 2 });
+  png.data.fill(255);
+  return { camera: 'front', maskImageBase64: PNG.sync.write(png).toString('base64'), maskWidth: 2, maskHeight: 2, ...overrides };
+}
+function options(blurZones) {
+  return { blurZones, streams: [{ camera: 'front', tag: '[front]' }], streamTags: ['[front]'], cameraW: 2, cameraH: 2, filters: [], cmd: [], tempFiles: [], inputCount: 1, extraOffset: 0, exportId: 'test', FPS: 36 };
+}
+
+test.each([
+  null,
+  zone({ camera: undefined }),
+  zone({ maskImageBase64: undefined }),
+  zone({ maskImageBase64: 'not a PNG' }),
+  zone({ maskWidth: 0 }),
+  zone({ maskHeight: NaN }),
+  zone({ maskWidth: 3 }),
+  zone({ maskWidth: 1000000 }),
+])('rejects malformed requested mask %# instead of continuing without blur', async invalid => {
+  const boundary = loadBoundary();
+  const opts = options([invalid]);
+  await expect(boundary.apply(opts)).rejects.toThrow();
+  expect(opts.streams[0].tag).toBe('[front]');
+});
+
+test('valid masks produce a decoded mask and replace both stream references', async () => {
+  const boundary = loadBoundary();
+  const opts = options([zone()]);
+  await boundary.apply(opts);
+  expect(opts.streams[0].tag).toBe('[blurred_front]');
+  expect(opts.streamTags).toEqual(['[blurred_front]']);
+  expect(opts.filters.join(';')).toContain('alphamerge');
+  const png = PNG.sync.read(boundary.files[0]);
+  expect([...png.data]).toEqual(new Array(16).fill(255));
+});
+
+test('preserves camera selection and rejects mask write errors', async () => {
+  const boundary = loadBoundary();
+  const selected = options([zone({ camera: 'back' })]);
+  await boundary.apply(selected);
+  expect(selected.cmd).toEqual([]);
+  boundary.fs.writeFileSync.mockImplementation(() => { throw new Error('disk full'); });
+  await expect(boundary.apply(options([zone()]))).rejects.toThrow('disk full');
+});
 
 function loadExportBoundary(browser) {
   const context = {

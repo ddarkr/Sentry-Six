@@ -1,74 +1,115 @@
-// Tests for GPU encoder detection caching in src/main/ffmpeg.js
-//
-// The expensive part of detection is the spawnSync probe battery
-// (ffmpeg -encoders + per-codec test encodes). The result must be
-// cached whether a GPU encoder was found or NOT found — machines
-// without GPUs must not re-run the probes on every export/check.
-
+const { EventEmitter } = require('events');
 jest.mock('child_process');
+jest.mock('electron');
 
-/**
- * Fresh require of the module so its internal cache state is reset.
- * Returns the module plus the spawnSync mock instance it captured.
- */
-function loadFfmpegModule(spawnSyncResult) {
+function load(output = '', status = 0) {
   jest.resetModules();
   const cp = require('child_process');
-  cp.spawnSync.mockReset();
-  cp.spawnSync.mockReturnValue(spawnSyncResult);
-  const ffmpeg = require('../../src/main/ffmpeg');
-  return { ffmpeg, spawnSync: cp.spawnSync };
+  cp.spawn.mockReset();
+  const children = [];
+  cp.spawn.mockImplementation(() => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = jest.fn();
+    children.push(child);
+    setImmediate(() => {
+      child.stdout.emit('data', Buffer.from(output));
+      child.emit('close', status);
+    });
+    return child;
+  });
+  return { ffmpeg: require('../../src/main/ffmpeg'), spawn: cp.spawn, children };
 }
 
-describe('detectGpuEncoder caching', () => {
-  test('caches a negative result (no usable GPU) and does not re-probe', () => {
-    // `ffmpeg -encoders` output contains none of the known GPU codecs,
-    // so detection concludes "no GPU encoder" without per-codec tests.
-    const { ffmpeg, spawnSync } = loadFfmpegModule(
-      { status: 0, stdout: 'V..... libx264  H.264 (codec h264)' }
-    );
-
-    const first = ffmpeg.detectGpuEncoder('ffmpeg');
-    expect(first).toBeNull();
-    const callsAfterFirst = spawnSync.mock.calls.length;
-    expect(callsAfterFirst).toBeGreaterThan(0);
-
-    const second = ffmpeg.detectGpuEncoder('ffmpeg');
-    expect(second).toBeNull();
-    expect(spawnSync.mock.calls.length).toBe(callsAfterFirst);
+for (const [method, prefix] of [['detectGpuEncoder', 'h264'], ['detectHEVCEncoder', 'hevc']]) {
+  describe(method, () => {
+    test.each([false, true])('coalesces concurrent work and caches usable=%s', async usable => {
+      const codec = `${prefix}_${process.platform === 'darwin' ? 'videotoolbox' : 'nvenc'}`;
+      const { ffmpeg, spawn } = load(usable ? `V..... ${codec}` : 'libx264');
+      const first = ffmpeg[method]('/a path/ffmpeg');
+      expect(ffmpeg[method]('/a path/ffmpeg')).toBe(first);
+      const result = await first;
+      if (usable) expect(result.codec).toBe(codec);
+      else expect(result).toBeNull();
+      const count = spawn.mock.calls.length;
+      expect(await ffmpeg[method]('/a path/ffmpeg')).toBe(result);
+      expect(spawn).toHaveBeenCalledTimes(count);
+      expect(spawn.mock.calls[0][2].shell).toBe(false);
+    });
   });
+}
 
-  test('caches a positive result and does not re-probe', () => {
-    const codec = process.platform === 'darwin' ? 'h264_videotoolbox' : 'h264_nvenc';
-    // -encoders lists the codec; the help probe and the test encode succeed.
-    const { ffmpeg, spawnSync } = loadFfmpegModule(
-      { status: 0, stdout: `V..... ${codec}` }
-    );
-
-    const first = ffmpeg.detectGpuEncoder('ffmpeg');
-    expect(first).not.toBeNull();
-    expect(first.codec).toBe(codec);
-    const callsAfterFirst = spawnSync.mock.calls.length;
-
-    const second = ffmpeg.detectGpuEncoder('ffmpeg');
-    expect(second).toBe(first);
-    expect(spawnSync.mock.calls.length).toBe(callsAfterFirst);
-  });
+test.each([0, 1])('path detection shares work and caches status %s', async status => {
+  const { ffmpeg, spawn } = load('', status);
+  const first = ffmpeg.findFFmpegPath();
+  expect(ffmpeg.findFFmpegPath()).toBe(first);
+  const result = await first;
+  expect(result === null).toBe(status !== 0);
+  const count = spawn.mock.calls.length;
+  expect(await ffmpeg.findFFmpegPath()).toBe(result);
+  expect(spawn).toHaveBeenCalledTimes(count);
 });
 
-describe('detectHEVCEncoder caching', () => {
-  test('caches a negative result (no usable HEVC encoder) and does not re-probe', () => {
-    const { ffmpeg, spawnSync } = loadFfmpegModule(
-      { status: 0, stdout: 'V..... libx264  H.264 (codec h264)' }
-    );
+test('hardware absence is coalesced and cached', async () => {
+  const { ffmpeg, spawn } = load();
+  const pending = ffmpeg.detectGpuHardware();
+  expect(ffmpeg.detectGpuHardware()).toBe(pending);
+  expect(await pending).toBeNull();
+  expect(await ffmpeg.detectGpuHardware()).toBeNull();
+  expect(spawn).toHaveBeenCalledTimes(1);
+});
 
-    const first = ffmpeg.detectHEVCEncoder('ffmpeg');
-    expect(first).toBeNull();
-    const callsAfterFirst = spawnSync.mock.calls.length;
-    expect(callsAfterFirst).toBeGreaterThan(0);
+test('probe is asynchronous and drains both pipes before close', async () => {
+  const { ffmpeg, children } = load('hello');
+  let settled = false;
+  const pending = ffmpeg.runProbe('/path with spaces/ffmpeg', ['-version']).then(result => { settled = true; return result; });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  children[0].stderr.emit('data', Buffer.from('diagnostic'));
+  expect(await pending).toMatchObject({ status: 0, stdout: 'hello', stderr: 'diagnostic' });
+  expect(children[0].listenerCount('close')).toBe(0);
+  expect(children[0].stdout.listenerCount('data')).toBe(0);
+});
 
-    const second = ffmpeg.detectHEVCEncoder('ffmpeg');
-    expect(second).toBeNull();
-    expect(spawnSync.mock.calls.length).toBe(callsAfterFirst);
-  });
+test('failed starts and timeouts settle once and clean up', async () => {
+  jest.useFakeTimers();
+  try {
+    const { ffmpeg, spawn } = load();
+    spawn.mockImplementationOnce(() => { throw new Error('missing'); });
+    expect((await ffmpeg.runProbe('missing', [])).error.message).toBe('missing');
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = jest.fn();
+    spawn.mockReturnValueOnce(child);
+    const pending = ffmpeg.runProbe('hung', [], { timeout: 10 });
+    jest.advanceTimersByTime(10);
+    expect((await pending).error.message).toBe('Probe timed out');
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(child.listenerCount('close')).toBe(0);
+    expect(jest.getTimerCount()).toBe(0);
+  } finally { jest.useRealTimers(); }
+});
+
+test('hardware success is cached after asynchronous completion', async () => {
+  const output = process.platform === 'darwin' ? 'Chipset Model: Test GPU' :
+    process.platform === 'win32' ? 'Name\nNVIDIA Test GPU\n' :
+      'VGA compatible controller: Test GPU';
+  const { ffmpeg, spawn } = load(output);
+  const result = await ffmpeg.detectGpuHardware();
+  expect(result).toContain('Test GPU');
+  expect(await ffmpeg.detectGpuHardware()).toBe(result);
+  expect(spawn).toHaveBeenCalledTimes(1);
+});
+
+test('spawn error resolves failure and ignores subsequent close', async () => {
+  const { ffmpeg, children } = load();
+  const pending = ffmpeg.runProbe('missing', []);
+  const child = children[0];
+  child.emit('error', new Error('ENOENT'));
+  child.emit('close', -1);
+  expect((await pending).error.message).toBe('ENOENT');
+  expect(child.listenerCount('error')).toBe(0);
+  expect(child.stderr.listenerCount('data')).toBe(0);
 });

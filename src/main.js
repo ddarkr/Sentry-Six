@@ -15,12 +15,9 @@ function compositeBlurMasks(width, height, zones) {
 
   for (const zone of zones) {
     const buf = Buffer.from(zone.maskImageBase64, 'base64');
-    let overlay;
-    try {
-      overlay = PNG.sync.read(buf);
-    } catch (err) {
-      console.warn('[BLUR] Skipping zone - failed to decode PNG mask:', err.message);
-      continue;
+    const overlay = PNG.sync.read(buf);
+    if (overlay.width !== width || overlay.height !== height) {
+      throw new Error('Blur mask dimensions do not match the requested mask');
     }
     const copyW = Math.min(overlay.width, width);
     const copyH = Math.min(overlay.height, height);
@@ -52,7 +49,7 @@ const { settingsPath, loadSettings, saveSettings, registerSettingsIpc } = requir
 const { SUPPORT_SERVER_URL, registerSupportChatIpc } = require('./main/supportChat');
 const { registerDiagnosticsStorageIpc } = require('./main/diagnostics');
 const { UPDATE_CONFIG, autoUpdater, getLatestVersionFromGitHub, registerAutoUpdateIpc, setupAutoUpdaterEvents } = require('./main/autoUpdate');
-const { findFFmpegPath, preCacheFFmpegPath, formatExportDuration, detectGpuHardware, detectGpuEncoder, detectHEVCEncoder, findVaapiDevice, getGpuEncoder, setGpuEncoder, getGpuEncoderHEVC, setGpuEncoderHEVC } = require('./main/ffmpeg');
+const { runProbe, findFFmpegPath, preCacheFFmpegPath, formatExportDuration, detectGpuHardware, detectGpuEncoder, detectHEVCEncoder, findVaapiDevice, getGpuEncoder, setGpuEncoder, getGpuEncoderHEVC, setGpuEncoderHEVC } = require('./main/ffmpeg');
 const { calculateMinimapSize, downloadStaticMapBackground, preRenderMinimap } = require('./main/minimap');
 const crypto = require('crypto');
 
@@ -203,7 +200,7 @@ function parseTimestampKeyToEpochMs(timestampKey) {
 
 /**
  * Apply blur zones to individual camera streams before grid/layout composition.
- * Shared by both custom-layout and grid-layout branches of performVideoExport.
+ * Shared by advanced, custom and grid layout branches of performVideoExport.
  *
  * @param {Object} opts
  * @param {Array}  opts.blurZones       - Export blur zone definitions
@@ -221,11 +218,19 @@ function parseTimestampKeyToEpochMs(timestampKey) {
  * @param {number} opts.FPS             - Frame rate
  */
 async function applyBlurZonesToStreams({ blurZones, blurType, streams, streamTags, cameraW, cameraH, filters, cmd, tempFiles, inputCount, extraOffset, exportId, FPS }) {
-  if (!blurZones.length) return false;
+  if (!Array.isArray(blurZones)) throw new Error('Invalid blur zones');
+  if (!blurZones.length) return;
 
   const zonesByCamera = {};
   for (const zone of blurZones) {
-    if (!zone || !zone.maskImageBase64 || !zone.camera) continue;
+    if (!zone || typeof zone.camera !== 'string' || !['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'].includes(zone.camera) ||
+        typeof zone.maskImageBase64 !== 'string' || !zone.maskImageBase64.length ||
+        !Number.isSafeInteger(zone.maskWidth) || zone.maskWidth <= 0 ||
+        !Number.isSafeInteger(zone.maskHeight) || zone.maskHeight <= 0 ||
+        zone.maskWidth > 16384 || zone.maskHeight > 16384 ||
+        zone.maskWidth * zone.maskHeight > 33554432) {
+      throw new Error('Invalid blur mask fields or dimensions');
+    }
     if (!zonesByCamera[zone.camera]) zonesByCamera[zone.camera] = [];
     zonesByCamera[zone.camera].push(zone);
   }
@@ -240,8 +245,11 @@ async function applyBlurZonesToStreams({ blurZones, blurType, streams, streamTag
 
     try {
       const firstZone = zones[0];
-      const maskW = firstZone.maskWidth || 1448;
-      const maskH = firstZone.maskHeight || 938;
+      const maskW = firstZone.maskWidth;
+      const maskH = firstZone.maskHeight;
+      if (zones.some(zone => zone.maskWidth !== maskW || zone.maskHeight !== maskH)) {
+        throw new Error('Blur masks for a camera must use matching dimensions');
+      }
 
       const compositeMaskBuffer = compositeBlurMasks(maskW, maskH, zones);
       const maskPath = path.join(os.tmpdir(), `blur_mask_${exportId}_${cam}_${Date.now()}.png`);
@@ -275,10 +283,9 @@ async function applyBlurZonesToStreams({ blurZones, blurType, streams, streamTag
       }
     } catch (err) {
       console.error('[BLUR] Failed to apply blur zone:', err);
-      return true;
+      throw err;
     }
   }
-  return false;
 }
 
 // Video Export Implementation
@@ -318,9 +325,9 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
   };
 
   let completeSent = false;
-  const sendComplete = (success, message, warning = null) => {
+  const sendComplete = (success, message) => {
     completeSent = true;
-    event.sender.send('export:progress', exportId, { type: 'complete', success, message, outputPath, warning });
+    event.sender.send('export:progress', exportId, { type: 'complete', success, message, outputPath });
   };
 
   const cleanup = () => {
@@ -335,8 +342,6 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
   // the screen-blend composite when Tesla Screen Dash is active.
   let minimapPixelSize = 0;
 
-  // Track blur zone failures
-  let blurFailed = false;
 
   // Check if export was cancelled before starting
   if (cancelledExports.has(exportId)) {
@@ -462,7 +467,7 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
       const probePath = probeInput.isConcat
         ? fs.readFileSync(probeInput.path, 'utf8').split('\n')[0].replace(/^file '|'$/g, '')
         : probeInput.path;
-      const probeResult = spawnSync(ffmpegPath, [
+      const probeResult = await runProbe(ffmpegPath, [
         '-i', probePath, '-hide_banner'
       ], { timeout: 10000, windowsHide: true });
       const probeOutput = (probeResult.stderr || '').toString();
@@ -479,7 +484,7 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
         const frontPath = frontInput.isConcat
           ? fs.readFileSync(frontInput.path, 'utf8').split('\n')[0].replace(/^file '|'$/g, '')
           : frontInput.path;
-        const frontProbe = spawnSync(ffmpegPath, [
+        const frontProbe = await runProbe(ffmpegPath, [
           '-i', frontPath, '-hide_banner'
         ], { timeout: 10000, windowsHide: true });
         const frontOutput = (frontProbe.stderr || '').toString();
@@ -533,7 +538,7 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
     }
 
     // Detect GPU encoder
-    const gpu = detectGpuEncoder(ffmpegPath);
+    const gpu = await detectGpuEncoder(ffmpegPath);
 
     // Build FFmpeg command with memory optimization flags
     const cmd = [ffmpegPath, '-y'];
@@ -1117,7 +1122,8 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
             sendMinimapProgress,
             cancelledExports,
             minimapDarkMode,
-            getEffectiveMapProvider()
+            getEffectiveMapProvider(),
+            activeExports
           );
 
           tempFiles.push(minimapTempPath);
@@ -1236,13 +1242,12 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
       }
 
       // Apply blur zones to individual camera streams BEFORE grid composition
-      const aeBlurResult = await applyBlurZonesToStreams({
+      await applyBlurZonesToStreams({
         blurZones, blurType, streams: aeStreams, streamTags: null,
         cameraW: w + (w % 2), cameraH: h + (h % 2),
         filters, cmd, tempFiles, inputCount: inputs.length,
         extraOffset: baseInputIdx !== null ? 1 : 0, exportId, FPS
       });
-      if (aeBlurResult) blurFailed = true;
 
       // Chain overlays: start with base, overlay each camera in order
       let aeTag = `[${baseInputIdx}:v]`;
@@ -1288,13 +1293,12 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
       }
 
       // Apply blur zones to individual camera streams BEFORE grid composition
-      const blurResult = await applyBlurZonesToStreams({
+      await applyBlurZonesToStreams({
         blurZones, blurType, streams: cameraStreams, streamTags: null,
         cameraW: camW, cameraH: camH,
         filters, cmd, tempFiles, inputCount: inputs.length,
         extraOffset: baseInputIdx !== null ? 1 : 0, exportId, FPS
       });
-      if (blurResult) blurFailed = true;
 
       if (customLayout.useXstack) {
         // Single compositing pass; gaps between tiles are filled black
@@ -1341,13 +1345,12 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
       }
 
       // Apply blur zones to individual camera streams BEFORE grid composition (grid layout)
-      const blurResult = await applyBlurZonesToStreams({
+      await applyBlurZonesToStreams({
         blurZones, blurType, streams: gridStreams, streamTags,
         cameraW: w + (w % 2), cameraH: h + (h % 2),
         filters, cmd, tempFiles, inputCount: inputs.length,
         extraOffset: 0, exportId, FPS
       });
-      if (blurResult) blurFailed = true;
 
       const numStreams = activeCamerasForGrid.length;
       if (numStreams > 1) {
@@ -1370,7 +1373,7 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
     // exceeded) — first detection spawns a test encode, so don't pay that cost
     // on exports that will never pick HEVC.
     const needsHevc = !mobileExport && gpu && (totalW > h264MaxRes || totalH > h264MaxRes);
-    const hevcGpu = needsHevc ? detectHEVCEncoder(ffmpegPath) : null;
+    const hevcGpu = needsHevc ? await detectHEVCEncoder(ffmpegPath) : null;
 
     // Determine best encoder: prefer H.264 GPU, fall back to HEVC GPU for high res, then CPU
     let useGpu = false;
@@ -1803,8 +1806,7 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
             console.log(`[EXPORT] ✅ Export completed in ${formattedDuration}`);
 
             const sizeMB = (fs.statSync(outputPath).size / 1048576).toFixed(1);
-            const warning = blurFailed ? { key: 'ui.export.blurZoneFailed' } : null;
-            sendComplete(true, { key: 'ui.export.exportCompleteMB', params: { size: sizeMB } }, warning);
+            sendComplete(true, { key: 'ui.export.exportCompleteMB', params: { size: sizeMB } });
             resolve(true);
             delete activeExportPaths[exportId];
             return;
@@ -2137,7 +2139,7 @@ ipcMain.handle('export:start', async (event, exportId, exportData) => {
   }
 
   try {
-    const ffmpegPath = findFFmpegPath();
+    const ffmpegPath = await findFFmpegPath();
     if (!ffmpegPath) {
       throw new Error('FFmpeg not found. Please install FFmpeg or place it in the ffmpeg_bin directory.');
     }
@@ -2689,7 +2691,7 @@ ipcMain.handle('fs:checkPendingDelete', async () => {
 });
 
 ipcMain.handle('ffmpeg:check', async () => {
-  const ffmpegPath = findFFmpegPath();
+  const ffmpegPath = await findFFmpegPath();
 
   // Check for fake no GPU setting (developer mode)
   const settings = loadSettings();
@@ -2701,8 +2703,7 @@ ipcMain.handle('ffmpeg:check', async () => {
   if (ffmpegPath && !fakeNoGpu) {
     // Use cached encoder values if available (detection spawns ffmpeg subprocesses)
     // detectGpuEncoder/detectHEVCEncoder cache both positive and negative results internally
-    const gpu = detectGpuEncoder(ffmpegPath);
-    const hevc = detectHEVCEncoder(ffmpegPath);
+    const [gpu, hevc] = await Promise.all([detectGpuEncoder(ffmpegPath), detectHEVCEncoder(ffmpegPath)]);
 
     if (gpu) {
       gpuInfo = { name: gpu.name, codec: gpu.codec };
@@ -3057,16 +3058,16 @@ ipcMain.handle('diagnostics:get', async () => {
     };
 
     // Check FFmpeg and GPU
-    const ffmpegPath = findFFmpegPath();
+    const ffmpegPath = await findFFmpegPath();
     const ffmpegDetected = ffmpegPath !== null;
 
     // Detect GPU if not already done (detectGpuEncoder caches both positive and negative results)
     if (ffmpegDetected) {
-      detectGpuEncoder(ffmpegPath);
+      await detectGpuEncoder(ffmpegPath);
     }
 
     // Detect actual GPU hardware
-    const gpuHardware = detectGpuHardware();
+    const gpuHardware = await detectGpuHardware();
 
     return {
       os: getOSName(),

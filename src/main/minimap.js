@@ -371,6 +371,7 @@ async function createMinimapRenderer(minimapWidth, minimapHeight) {
     });
     
     // Inject headers for OSM tile requests (same as main window)
+    try {
     minimapWindow.webContents.session.webRequest.onBeforeSendHeaders(
       { urls: ['https://*.tile.openstreetmap.org/*'] },
       (details, callback) => {
@@ -379,86 +380,85 @@ async function createMinimapRenderer(minimapWidth, minimapHeight) {
         callback({ requestHeaders: details.requestHeaders });
       }
     );
-
-    const timeout = setTimeout(() => {
-      console.error('[MINIMAP] Renderer load timeout');
-      reject(new Error('Minimap renderer load timeout'));
-    }, 15000);
-    
-    minimapWindow.webContents.once('did-fail-load', (event, errorCode, errorDescription) => {
-      clearTimeout(timeout);
-      console.error(`[MINIMAP] Renderer failed to load: ${errorDescription}`);
-      reject(new Error(`Minimap renderer failed to load: ${errorDescription}`));
-    });
-    
-    minimapWindow.webContents.once('did-finish-load', () => {
-      clearTimeout(timeout);
-      console.log('[MINIMAP] Renderer loaded successfully');
-      setTimeout(() => resolve(minimapWindow), 500);
-    });
-    
-    // Load minimap renderer HTML
-    const rendererPath = path.join(__dirname, '..', 'renderer', 'minimap-renderer.html');
-    console.log(`[MINIMAP] Loading renderer from: ${rendererPath}`);
-    
-    if (!fs.existsSync(rendererPath)) {
-      clearTimeout(timeout);
-      reject(new Error(`Minimap renderer not found at: ${rendererPath}`));
+    } catch (error) {
+      minimapWindow.destroy();
+      reject(error);
       return;
     }
-    
-    minimapWindow.loadFile(rendererPath);
+
+    let settled = false;
+    let readyTimer;
+    const cleanup = () => {
+      clearTimeout(timeout);
+      clearTimeout(readyTimer);
+      minimapWindow.webContents.removeListener('did-fail-load', onFailure);
+      minimapWindow.webContents.removeListener('did-finish-load', onLoaded);
+      minimapWindow.removeListener('closed', onClosed);
+    };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (!minimapWindow.isDestroyed()) minimapWindow.destroy();
+      reject(error);
+    };
+    const onFailure = (event, code, description) => fail(new Error(`Minimap renderer failed to load: ${description}`));
+    const onClosed = () => fail(new Error('Minimap renderer closed'));
+    const onLoaded = () => {
+      readyTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(minimapWindow);
+      }, 500);
+    };
+    const timeout = setTimeout(() => fail(new Error('Minimap renderer load timeout')), 15000);
+    minimapWindow.webContents.once('did-fail-load', onFailure);
+    minimapWindow.webContents.once('did-finish-load', onLoaded);
+    minimapWindow.once('closed', onClosed);
+    const rendererPath = path.join(__dirname, '..', 'renderer', 'minimap-renderer.html');
+    try {
+      if (!fs.existsSync(rendererPath)) throw new Error(`Minimap renderer not found at: ${rendererPath}`);
+      Promise.resolve(minimapWindow.loadFile(rendererPath)).catch(fail);
+    } catch (error) {
+      fail(error);
+    }
   });
 }
 
-// Render a single minimap frame and capture it
-async function renderMinimapFrame(minimapWindow, lat, lon, heading, width, height) {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      minimapReadyCallbacks.delete(minimapWindow.webContents.id);
-      reject(new Error('Minimap render timeout'));
-    }, 5000);
-    
-    minimapReadyCallbacks.set(minimapWindow.webContents.id, async () => {
-      clearTimeout(timeout);
-      try {
-        const image = await minimapWindow.webContents.capturePage();
-        const pngBuffer = image.toPNG();
-        resolve(pngBuffer);
-      } catch (err) {
-        reject(err);
-      }
-    });
-    
-    minimapWindow.webContents.send('minimap:update', lat, lon, heading);
-  });
-}
 
 // Render minimap frame by timestamp (uses client-side interpolation)
 async function renderMinimapFrameByTime(minimapWindow, timestampMs, width, height) {
+  const contents = minimapWindow.webContents;
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      minimapReadyCallbacks.delete(minimapWindow.webContents.id);
-      reject(new Error('Minimap render timeout'));
-    }, 3000); // Shorter timeout since we're just moving marker
-    
-    minimapReadyCallbacks.set(minimapWindow.webContents.id, async () => {
+    const finish = (error, buffer) => {
       clearTimeout(timeout);
+      minimapReadyCallbacks.delete(contents.id);
+      minimapWindow.removeListener('closed', onClosed);
+      if (error) reject(error);
+      else resolve(buffer);
+    };
+    const onClosed = () => finish(new Error('Minimap renderer closed'));
+    const timeout = setTimeout(() => finish(new Error('Minimap render timeout')), 3000);
+    minimapWindow.once('closed', onClosed);
+    minimapReadyCallbacks.set(contents.id, async () => {
       try {
-        const image = await minimapWindow.webContents.capturePage();
-        const pngBuffer = image.toPNG();
-        resolve(pngBuffer);
-      } catch (err) {
-        reject(err);
+        const image = await contents.capturePage();
+        finish(null, image.toPNG());
+      } catch (error) {
+        finish(error);
       }
     });
-    
-    minimapWindow.webContents.send('minimap:updateByTime', timestampMs);
+    try {
+      contents.send('minimap:updateByTime', timestampMs);
+    } catch (error) {
+      finish(error);
+    }
   });
 }
 
 // Pre-render minimap overlay to a temp video file
-async function preRenderMinimap(exportId, seiData, mapPath, startTimeMs, endTimeMs, minimapWidth, minimapHeight, ffmpegPath, sendProgress, cancelledExports, darkMode = false, providerId = MapProviders.DEFAULT_PROVIDER_ID) {
+async function preRenderMinimap(exportId, seiData, mapPath, startTimeMs, endTimeMs, minimapWidth, minimapHeight, ffmpegPath, sendProgress, cancelledExports, darkMode = false, providerId = MapProviders.DEFAULT_PROVIDER_ID, activeExports) {
   // Capture at 12fps instead of the video's 36fps: every frame is a separate
   // BrowserWindow capturePage round-trip, which dominates export time on long
   // clips (a 5-minute clip is ~10,800 captures at 36fps). The overlay filter
@@ -477,7 +477,19 @@ async function preRenderMinimap(exportId, seiData, mapPath, startTimeMs, endTime
   
   console.log(`[MINIMAP] Creating renderer window ${minimapWidth}x${minimapHeight}`);
   console.log(`[MINIMAP] Smooth mode: ${totalFrames} frames at ${FPS}fps with interpolation`);
-  const minimapWindow = await createMinimapRenderer(minimapWidth, minimapHeight);
+  let minimapWindow;
+  let ffmpegProcess;
+  let childClosed;
+  let childFailure;
+  let closed = false;
+  let succeeded = false;
+  let onStderr;
+  let onPipeError;
+  let onProcessError;
+  let onClose;
+  try {
+  if (cancelledExports.has(exportId)) throw new Error('Export cancelled');
+  minimapWindow = await createMinimapRenderer(minimapWidth, minimapHeight);
 
   // Set the tile provider before the view locks so the right tiles load
   minimapWindow.webContents.send('minimap:setProvider', providerId);
@@ -523,58 +535,84 @@ async function preRenderMinimap(exportId, seiData, mapPath, startTimeMs, endTime
   
   console.log(`[MINIMAP] Starting FFmpeg: ${ffmpegPath} ${ffmpegArgs.join(' ')}`);
   
-  const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs, {
+  if (cancelledExports.has(exportId)) throw new Error('Export cancelled');
+  ffmpegProcess = spawn(ffmpegPath, ffmpegArgs, {
     stdio: ['pipe', 'pipe', 'pipe']
   });
-  
-  let ffmpegError = null;
-  ffmpegProcess.stderr.on('data', (data) => {
-    const msg = data.toString();
-    if (msg.includes('error') || msg.includes('Error')) {
-      ffmpegError = msg;
-    }
+  activeExports[exportId] = ffmpegProcess;
+  let ffmpegError = '';
+  let encodingFinished = false;
+  let failChild;
+  childFailure = new Promise((resolve, reject) => { failChild = reject; });
+  // A child can fail between awaits; keep its rejection observed immediately.
+  childFailure.catch(() => {});
+  childClosed = new Promise(resolve => {
+    onClose = (code) => {
+      closed = true;
+      const error = new Error(`FFmpeg minimap encoding ended with code ${code}: ${ffmpegError}`);
+      if (!encodingFinished || code !== 0) failChild(error);
+      resolve(code);
+    };
+    ffmpegProcess.once('close', onClose);
   });
-  
-  try {
-    for (let frame = 0; frame < totalFrames; frame++) {
-      if (cancelledExports.has(exportId)) {
-        ffmpegProcess.stdin.end();
-        minimapWindow.destroy();
-        try { fs.unlinkSync(tempPath); } catch {}
-        throw new Error('Export cancelled');
-      }
-      
-      const frameTimeMs = startTimeMs + (frame / FPS) * 1000;
-      
-      // Use timestamp-based update (renderer handles interpolation)
-      const pngBuffer = await renderMinimapFrameByTime(minimapWindow, frameTimeMs, minimapWidth, minimapHeight);
-      ffmpegProcess.stdin.write(pngBuffer);
-      
-      if (frame % FPS === 0 || frame === totalFrames - 1) {
-        const pct = Math.round((frame / totalFrames) * 100);
-        sendProgress(pct, `Pre-rendering minimap... ${pct}%`);
+  onProcessError = error => failChild(error);
+  onPipeError = error => failChild(error);
+  onStderr = data => { ffmpegError = (ffmpegError + data.toString()).slice(-8192); };
+  ffmpegProcess.on('error', onProcessError);
+  ffmpegProcess.stdin.on('error', onPipeError);
+  ffmpegProcess.stderr.on('data', onStderr);
+
+  for (let frame = 0; frame < totalFrames; frame++) {
+    if (cancelledExports.has(exportId)) throw new Error('Export cancelled');
+    const frameTimeMs = startTimeMs + (frame / FPS) * 1000;
+    const pngBuffer = await Promise.race([
+      renderMinimapFrameByTime(minimapWindow, frameTimeMs, minimapWidth, minimapHeight),
+      childFailure
+    ]);
+    if (cancelledExports.has(exportId)) throw new Error('Export cancelled');
+    if (!ffmpegProcess.stdin.write(pngBuffer)) {
+      let onDrain;
+      try {
+        await Promise.race([
+          new Promise(resolve => {
+            onDrain = resolve;
+            ffmpegProcess.stdin.once('drain', onDrain);
+          }),
+          childFailure
+        ]);
+      } finally {
+        ffmpegProcess.stdin.removeListener('drain', onDrain);
       }
     }
-    
-    ffmpegProcess.stdin.end();
-    
-    await new Promise((resolve, reject) => {
-      ffmpegProcess.on('close', (code) => {
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(new Error(`FFmpeg minimap encoding failed with code ${code}: ${ffmpegError || 'Unknown error'}`));
-        }
-      });
-      ffmpegProcess.on('error', reject);
-    });
-    
-    minimapWindow.destroy();
-    return tempPath;
-  } catch (err) {
-    minimapWindow.destroy();
-    try { fs.unlinkSync(tempPath); } catch {}
-    throw err;
+    if (frame % FPS === 0 || frame === totalFrames - 1) {
+      const pct = Math.round((frame / totalFrames) * 100);
+      sendProgress(pct, `Pre-rendering minimap... ${pct}%`);
+    }
+  }
+  encodingFinished = true;
+  ffmpegProcess.stdin.end();
+  const code = await Promise.race([childClosed, childFailure]);
+  if (cancelledExports.has(exportId)) throw new Error('Export cancelled');
+  if (code !== 0) throw new Error(`FFmpeg minimap encoding failed with code ${code}: ${ffmpegError}`);
+  succeeded = true;
+  return tempPath;
+  } finally {
+    if (minimapWindow && !minimapWindow.isDestroyed()) minimapWindow.destroy();
+    if (ffmpegProcess) {
+      if (!closed) {
+        ffmpegProcess.stdin.destroy();
+        ffmpegProcess.kill('SIGKILL');
+      }
+      await childClosed;
+      ffmpegProcess.removeListener('error', onProcessError);
+      ffmpegProcess.removeListener('close', onClose);
+      ffmpegProcess.stdin.removeListener('error', onPipeError);
+      ffmpegProcess.stderr.removeListener('data', onStderr);
+      if (activeExports[exportId] === ffmpegProcess) delete activeExports[exportId];
+    }
+    if (!succeeded) {
+      try { fs.unlinkSync(tempPath); } catch {}
+    }
   }
 }
 

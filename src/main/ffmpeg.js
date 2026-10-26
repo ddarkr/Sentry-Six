@@ -2,13 +2,55 @@ const { app } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { spawnSync, spawn } = require('child_process');
+const { spawn } = require('child_process');
 
 // Cached GPU encoder detection
 let gpuEncoder = undefined; // undefined = not checked, null = checked but none usable
 let gpuEncoderHEVC = undefined; // undefined = not checked, null = checked but none usable
 let cachedGpuHardware = undefined; // undefined = not checked, null = checked but not found
 let cachedFFmpegPath = undefined; // undefined = not checked, null = checked but not found
+let pathProbe;
+let hardwareProbe;
+let gpuProbe;
+let hevcProbe;
+
+// Collect both pipes and settle once, including failed starts and hung probes.
+function runProbe(executable, args, { timeout = 5000 } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    let timer;
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const onStdout = data => { stdout += data.toString(); };
+    const onStderr = data => { stderr += data.toString(); };
+    const finish = (status, error = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child?.stdout?.removeListener('data', onStdout);
+      child?.stderr?.removeListener('data', onStderr);
+      child?.removeListener('error', onError);
+      child?.removeListener('close', onClose);
+      resolve({ status, stdout, stderr, error });
+    };
+    const onError = error => finish(null, error);
+    const onClose = code => finish(code);
+    try {
+      child = spawn(executable, args, { windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+      child.stdout?.on('data', onStdout);
+      child.stderr?.on('data', onStderr);
+      child.once('error', onError);
+      child.once('close', onClose);
+      timer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch {}
+        finish(null, new Error('Probe timed out'));
+      }, timeout);
+    } catch (error) {
+      finish(null, error);
+    }
+  });
+}
 
 /**
  * Ensures macOS/Linux FFmpeg binaries are executable.
@@ -33,7 +75,6 @@ function ensureExecutable(filePath) {
 
 /**
  * Build the platform-specific ordered list of paths to check for ffmpeg.
- * Shared by the sync and async detection paths.
  */
 function buildFFmpegCandidatePaths() {
   const isMac = process.platform === 'darwin';
@@ -84,64 +125,10 @@ function buildFFmpegCandidatePaths() {
 }
 
 function findFFmpegPath() {
-  // Return cached path if already found
-  if (cachedFFmpegPath !== undefined) return cachedFFmpegPath;
-
-  const paths = buildFFmpegCandidatePaths();
-  console.log('[SEARCH] Searching for FFmpeg in:', paths);
-
-  for (const p of paths) {
-    try {
-      // First check if file exists (skip for bare 'ffmpeg' which relies on PATH)
-      const exists = p === 'ffmpeg' || fs.existsSync(p);
-      console.log(`  Checking ${p}: exists=${exists}`);
-
-      if (!exists) continue;
-
-      // Ensure bundled binaries are executable on macOS/Linux
-      if (p !== 'ffmpeg' && !p.startsWith('/opt') && !p.startsWith('/usr')) {
-        ensureExecutable(p);
-      }
-
-      // Execute directly: symlinks work without a shell, and app paths can
-      // contain spaces (for example, /Applications/Sentry Studio.app).
-      const result = spawnSync(p, ['-version'], {
-        timeout: 5000,
-        windowsHide: true,
-        encoding: 'utf8',
-        shell: false
-      });
-
-      console.log(`  Spawn result: status=${result.status}, error=${result.error?.message || 'none'}`);
-
-      if (result.status === 0) {
-        console.log(`[OK] Found FFmpeg at: ${p}`);
-        cachedFFmpegPath = p;
-        return p;
-      }
-    } catch (err) {
-      console.log(`  Error checking ${p}: ${err.message}`);
-    }
-  }
-
-  console.warn('[ERROR] FFmpeg not found in any of the checked paths');
-  cachedFFmpegPath = null;
-  return null;
-}
-
-/**
- * Async version of findFFmpegPath — uses spawn (not spawnSync) so the Node
- * event loop is never blocked. Used by preCacheFFmpegPath so startup IPC
- * (and any pending renderer messages) keep flowing while FFmpeg is probed.
- */
-function findFFmpegPathAsync() {
   if (cachedFFmpegPath !== undefined) return Promise.resolve(cachedFFmpegPath);
-
+  if (pathProbe) return pathProbe;
   const paths = buildFFmpegCandidatePaths();
-  console.log('[SEARCH] Searching for FFmpeg in:', paths);
-
-  // Probe paths sequentially so the first match wins (same order as sync version).
-  return (async () => {
+  pathProbe = (async () => {
     for (const p of paths) {
       try {
         const exists = p === 'ffmpeg' || fs.existsSync(p);
@@ -152,32 +139,8 @@ function findFFmpegPathAsync() {
           ensureExecutable(p);
         }
 
-        const ok = await new Promise((resolve) => {
-          let settled = false;
-          const done = (val) => { if (!settled) { settled = true; resolve(val); } };
-          let proc;
-          try {
-            proc = spawn(p, ['-version'], { windowsHide: true, shell: false });
-          } catch (err) {
-            console.log(`  Spawn threw for ${p}: ${err.message}`);
-            return done(false);
-          }
-          const killer = setTimeout(() => {
-            try { proc.kill(); } catch {}
-            console.log(`  Spawn timeout for ${p}`);
-            done(false);
-          }, 5000);
-          proc.on('error', (err) => {
-            clearTimeout(killer);
-            console.log(`  Spawn error for ${p}: ${err.message}`);
-            done(false);
-          });
-          proc.on('exit', (code) => {
-            clearTimeout(killer);
-            console.log(`  Spawn result: status=${code}, error=none`);
-            done(code === 0);
-          });
-        });
+        const result = await runProbe(p, ['-version']);
+        const ok = result.status === 0;
 
         if (ok) {
           console.log(`[OK] Found FFmpeg at: ${p}`);
@@ -192,7 +155,8 @@ function findFFmpegPathAsync() {
     console.warn('[ERROR] FFmpeg not found in any of the checked paths');
     cachedFFmpegPath = null;
     return null;
-  })();
+  })().finally(() => { pathProbe = undefined; });
+  return pathProbe;
 }
 
 /**
@@ -202,7 +166,7 @@ function findFFmpegPathAsync() {
 async function preCacheFFmpegPath() {
   if (cachedFFmpegPath !== undefined) return; // Already cached
   console.log('[STARTUP] Pre-caching FFmpeg path...');
-  const result = await findFFmpegPathAsync();
+  const result = await findFFmpegPath();
   console.log(`[STARTUP] FFmpeg pre-cache complete: ${result ? 'found' : 'not found'}`);
 }
 
@@ -231,16 +195,17 @@ function formatExportDuration(ms) {
  * This is separate from encoder detection - shows the actual hardware.
  */
 function detectGpuHardware() {
-  if (cachedGpuHardware !== undefined) return cachedGpuHardware;
+  if (cachedGpuHardware !== undefined) return Promise.resolve(cachedGpuHardware);
+  if (!hardwareProbe) hardwareProbe = probeGpuHardware().finally(() => { hardwareProbe = undefined; });
+  return hardwareProbe;
+}
+
+async function probeGpuHardware() {
   
   try {
     if (process.platform === 'win32') {
       // Windows: Use wmic to get GPU name
-      const result = spawnSync('wmic', ['path', 'win32_VideoController', 'get', 'name'], {
-        timeout: 5000,
-        windowsHide: true,
-        shell: true
-      });
+      const result = await runProbe('wmic', ['path', 'win32_VideoController', 'get', 'name']);
       const output = result.stdout?.toString() || '';
       const lines = output.split('\n').map(l => l.trim()).filter(l => l && l !== 'Name');
       if (lines.length > 0) {
@@ -254,9 +219,7 @@ function detectGpuHardware() {
       }
     } else if (process.platform === 'darwin') {
       // macOS: Use system_profiler
-      const result = spawnSync('system_profiler', ['SPDisplaysDataType'], {
-        timeout: 5000
-      });
+      const result = await runProbe('system_profiler', ['SPDisplaysDataType']);
       const output = result.stdout?.toString() || '';
       const chipMatch = output.match(/Chipset Model:\s*(.+)/i) || output.match(/Chip:\s*(.+)/i);
       if (chipMatch) {
@@ -266,7 +229,7 @@ function detectGpuHardware() {
       }
     } else {
       // Linux: Use lspci
-      const result = spawnSync('lspci', ['-v'], { timeout: 5000 });
+      const result = await runProbe('lspci', ['-v']);
       const output = result.stdout?.toString() || '';
       const vgaMatch = output.match(/VGA compatible controller:\s*(.+)/i);
       if (vgaMatch) {
@@ -303,14 +266,11 @@ function findVaapiDevice() {
  * FFmpeg may list encoders that aren't usable (e.g., NVENC listed but no NVIDIA GPU).
  * Uses a strict test: only returns true if the encoder actually works (status === 0).
  */
-function testEncoderCapability(ffmpegPath, codec) {
+async function testEncoderCapability(ffmpegPath, codec) {
   try {
     // Verify encoder exists in FFmpeg build
-    const helpResult = spawnSync(ffmpegPath, ['-hide_banner', '-h', `encoder=${codec}`], { 
-      timeout: 2000, 
-      windowsHide: true,
-      stdio: 'pipe'
-    });
+    const helpResult = await runProbe(ffmpegPath, ['-hide_banner', '-h', `encoder=${codec}`], { timeout: 2000 });
+    if (helpResult.status !== 0) return false;
     
     const helpOutput = (helpResult.stdout?.toString() || '') + (helpResult.stderr?.toString() || '');
     
@@ -344,11 +304,7 @@ function testEncoderCapability(ffmpegPath, codec) {
     
     testArgs.push('-c:v', codec, '-frames:v', '1', '-f', 'null', '-');
     
-    const testResult = spawnSync(ffmpegPath, testArgs, { 
-      timeout: 5000,
-      windowsHide: true,
-      stdio: 'pipe'
-    });
+    const testResult = await runProbe(ffmpegPath, testArgs);
     
     const testOutput = (testResult.stdout?.toString() || '') + (testResult.stderr?.toString() || '');
     
@@ -388,11 +344,16 @@ function testEncoderCapability(ffmpegPath, codec) {
 }
 
 function detectGpuEncoder(ffmpegPath) {
-  if (gpuEncoder !== undefined) return gpuEncoder;
+  if (gpuEncoder !== undefined) return Promise.resolve(gpuEncoder);
+  if (!gpuProbe) gpuProbe = probeGpuEncoder(ffmpegPath).finally(() => { gpuProbe = undefined; });
+  return gpuProbe;
+}
+
+async function probeGpuEncoder(ffmpegPath) {
   
   try {
     // Query FFmpeg for available encoders
-    const encoderResult = spawnSync(ffmpegPath, ['-encoders'], { timeout: 5000, windowsHide: true });
+    const encoderResult = await runProbe(ffmpegPath, ['-encoders']);
     const encoderOutput = encoderResult.stdout?.toString() || '';
     
     // Define encoder priority by platform
@@ -423,7 +384,7 @@ function detectGpuEncoder(ffmpegPath) {
     for (const encoder of encodersToCheck) {
       if (encoderOutput.includes(encoder.codec)) {
         console.log(`[TEST] Testing ${encoder.name} (${encoder.codec})...`);
-        if (testEncoderCapability(ffmpegPath, encoder.codec)) {
+        if (await testEncoderCapability(ffmpegPath, encoder.codec)) {
           gpuEncoder = encoder;
           console.log(`[GPU] GPU encoder available: ${gpuEncoder.name}`);
           return gpuEncoder;
@@ -448,11 +409,16 @@ function detectGpuEncoder(ffmpegPath) {
  * Used when H.264 GPU encoding would exceed resolution limits.
  */
 function detectHEVCEncoder(ffmpegPath) {
-  if (gpuEncoderHEVC !== undefined) return gpuEncoderHEVC;
+  if (gpuEncoderHEVC !== undefined) return Promise.resolve(gpuEncoderHEVC);
+  if (!hevcProbe) hevcProbe = probeHEVCEncoder(ffmpegPath).finally(() => { hevcProbe = undefined; });
+  return hevcProbe;
+}
+
+async function probeHEVCEncoder(ffmpegPath) {
   
   try {
     // Query FFmpeg for available encoders
-    const encoderResult = spawnSync(ffmpegPath, ['-encoders'], { timeout: 5000, windowsHide: true });
+    const encoderResult = await runProbe(ffmpegPath, ['-encoders']);
     const encoderOutput = encoderResult.stdout?.toString() || '';
     
     // HEVC encoders by platform
@@ -481,7 +447,7 @@ function detectHEVCEncoder(ffmpegPath) {
     for (const encoder of hevcEncoders) {
       if (encoderOutput.includes(encoder.codec)) {
         console.log(`[TEST] Testing HEVC encoder ${encoder.name} (${encoder.codec})...`);
-        if (testEncoderCapability(ffmpegPath, encoder.codec)) {
+        if (await testEncoderCapability(ffmpegPath, encoder.codec)) {
           gpuEncoderHEVC = encoder;
           console.log(`[GPU] HEVC encoder available: ${gpuEncoderHEVC.name}`);
           return gpuEncoderHEVC;
@@ -509,6 +475,7 @@ function getGpuEncoderHEVC() { return gpuEncoderHEVC; }
 function setGpuEncoderHEVC(val) { gpuEncoderHEVC = val; }
 
 module.exports = {
+  runProbe,
   findFFmpegPath,
   preCacheFFmpegPath,
   formatExportDuration,

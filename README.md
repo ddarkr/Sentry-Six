@@ -178,6 +178,8 @@ authentication, tradeoffs and verification scope.
 - SEI telemetry is typically not recorded while parked
 - SEI telemetry while using Smart Summon will be notated as manual
 - Brake/accelerator pedal data is not logged during Self Driving. Pedal activity while Autopilot/Self Driving is engaged indicates driver input.
+- A requested privacy blur must be applied successfully or the export stops. Invalid masks are not silently omitted.
+- FFmpeg discovery and encoder/resolution probes run asynchronously. Failed or cancelled Leaflet minimap rendering releases its hidden window and encoder process.
 
 ## Project Origin & Credits
 
