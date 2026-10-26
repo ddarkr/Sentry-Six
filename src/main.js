@@ -48,7 +48,6 @@ function compositeBlurMasks(width, height, zones) {
 
   return PNG.sync.write(canvas);
 }
-const { checkUpdateWithTelemetry, processApiResponse } = require('./updateTelemetry');
 const { settingsPath, loadSettings, saveSettings, registerSettingsIpc } = require('./main/settings');
 const { SUPPORT_SERVER_URL, registerSupportChatIpc } = require('./main/supportChat');
 const { registerDiagnosticsStorageIpc } = require('./main/diagnostics');
@@ -2943,10 +2942,7 @@ ipcMain.handle('sentryUsb:getDriveDetail', async (_event, driveId) => {
 // Auto-update module (extracted to src/main/autoUpdate.js)
 registerAutoUpdateIpc({
   getMainWindow: () => mainWindow,
-  getUpdateBranch,
-  loadSettings,
-  checkUpdateWithTelemetry,
-  processApiResponse
+  getUpdateBranch
 });
 
 // Developer Settings IPC Handlers

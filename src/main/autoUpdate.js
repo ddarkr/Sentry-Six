@@ -136,9 +136,6 @@ function copyDirectoryRecursive(src, dest) {
  * @param {object} deps - Dependencies
  * @param {function} deps.getMainWindow - Returns the main BrowserWindow
  * @param {function} deps.getUpdateBranch - Returns the configured update branch
- * @param {function} deps.loadSettings - Returns settings object
- * @param {function} deps.checkUpdateWithTelemetry - Telemetry check function
- * @param {function} deps.processApiResponse - Process telemetry API response
  */
 function registerAutoUpdateIpc(deps) {
   // Mac App Store builds update exclusively via the App Store — skip all GitHub update logic
@@ -147,7 +144,7 @@ function registerAutoUpdateIpc(deps) {
     return;
   }
 
-  const { getMainWindow, getUpdateBranch, loadSettings, checkUpdateWithTelemetry, processApiResponse } = deps;
+  const { getMainWindow, getUpdateBranch } = deps;
 
   /**
    * Check for updates - handles both packaged (NSIS) and development (npm start) modes
@@ -274,69 +271,7 @@ function registerAutoUpdateIpc(deps) {
   // Update IPC handlers
   ipcMain.handle('update:check', async () => {
     try {
-      // Step 1: Check with telemetry API (for killswitch and update status)
-      console.log('[UPDATE] Checking with telemetry API...');
-      const apiResponse = await checkUpdateWithTelemetry();
-      const processedResult = processApiResponse(apiResponse);
-      
-      // Handle force_manual (killswitch)
-      if (processedResult.action === 'force_manual') {
-        console.log('[UPDATE] Force manual update required (killswitch activated)');
-        const mainWindow = getMainWindow();
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('update:forceManual', {
-            message: processedResult.message,
-            download_url: processedResult.download_url,
-            new_version: processedResult.new_version,
-            currentVersion: app.getVersion()
-          });
-        }
-        return {
-          checked: true,
-          updateAvailable: true,
-          forceManual: true,
-          message: processedResult.message,
-          download_url: processedResult.download_url,
-          currentVersion: app.getVersion(),
-          latestVersion: processedResult.new_version
-        };
-      }
-      
-      // Handle update available from API
-      if (processedResult.action === 'update_available') {
-        console.log('[UPDATE] Update available from API:', processedResult.new_version);
-        const mainWindow = getMainWindow();
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('update:available', {
-            currentVersion: app.getVersion(),
-            latestVersion: processedResult.new_version,
-            releaseName: 'New Update',
-            serverMessage: processedResult.message
-          });
-        }
-        return {
-          checked: true,
-          updateAvailable: true,
-          currentVersion: app.getVersion(),
-          latestVersion: processedResult.new_version,
-          serverMessage: processedResult.message
-        };
-      }
-      
-      // Handle up_to_date from API
-      if (processedResult.action === 'up_to_date') {
-        console.log('[UPDATE] App is up to date (from API)');
-        return {
-          checked: true,
-          updateAvailable: false,
-          currentVersion: app.getVersion(),
-          latestVersion: app.getVersion(),
-          serverMessage: processedResult.message
-        };
-      }
-      
-      // Fallback to direct GitHub/electron-updater check
-      console.log('[UPDATE] API unavailable, falling back to direct check...');
+      console.log('[UPDATE] Checking for updates directly...');
       if (app.isPackaged && autoUpdater) {
         const result = await autoUpdater.checkForUpdates();
         const updateAvailable = result?.updateInfo?.version && 

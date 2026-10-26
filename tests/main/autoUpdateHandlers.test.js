@@ -30,10 +30,7 @@ const handlers = {};
 beforeAll(() => {
   registerAutoUpdateIpc({
     getMainWindow: jest.fn(() => null),
-    getUpdateBranch: jest.fn(() => 'main'),
-    loadSettings: jest.fn(() => ({})),
-    checkUpdateWithTelemetry: jest.fn(),
-    processApiResponse: jest.fn()
+    getUpdateBranch: jest.fn(() => 'main')
   });
   for (const [channel, handler] of ipcMain.handle.mock.calls) {
     handlers[channel] = handler;
@@ -51,6 +48,35 @@ beforeEach(() => {
   autoUpdater.allowDowngrade = false;
   autoUpdater.removeAllListeners('error');
   autoUpdater.removeAllListeners('update-downloaded');
+});
+
+describe('update:check', () => {
+  test.each([
+    ['2026.12.12', false],
+    ['2026.12.13', false],
+    ['2026.12.14', true]
+  ])('compares the installed version with release %s without telemetry dependencies', async (version, updateAvailable) => {
+    autoUpdater.checkForUpdates.mockResolvedValue({ updateInfo: { version } });
+
+    const result = await handlers['update:check']();
+
+    expect(result).toEqual({
+      checked: true,
+      updateAvailable,
+      currentVersion: '2026.12.13',
+      latestVersion: version
+    });
+  });
+
+  test('reports an update check failure without claiming the app is current', async () => {
+    autoUpdater.checkForUpdates.mockRejectedValue(new Error('network down'));
+
+    expect(await handlers['update:check']()).toEqual({
+      checked: false,
+      updateAvailable: false,
+      error: 'network down'
+    });
+  });
 });
 
 describe('update:exit', () => {

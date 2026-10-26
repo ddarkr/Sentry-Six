@@ -1917,7 +1917,7 @@ setTimeout(loadSentryUsbDataOnStartup, 800);
 
 // Check for updates on startup (unless API requests are disabled in developer settings).
 // Runs silently in the background — if an update is available, the existing
-// update-available / force-manual modals surface it. No blocking UI on startup.
+// update-available modal surfaces it. No blocking UI on startup.
 async function checkForUpdatesOnStartup() {
     let apiRequestsDisabled = false;
 

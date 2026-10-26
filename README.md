@@ -107,14 +107,14 @@ Not affiliated with Tesla, Inc. Unrelated to the Sentry (sentry.io) error-monito
 
 ## Privacy & Updates
 
-Sentry Studio includes a privacy-first approach to updates and analytics:
+Update checks use GitHub directly (Mac App Store builds update through the App Store).
+They do not generate device identifiers or send fingerprints, system information,
+or version-usage statistics to the Sentry Six update API. Server-directed forced
+manual updates are no longer supported.
 
-- **Automatic Updates**: The app checks for updates to keep running smoothly with the latest features
-- **Anonymous Version Stats**: A random ID helps us see which versions are most popular so we can fix bugs faster
-- **No Personal Info**: We never collect or send any personal information to our servers
-- **First-Time Notice**: You'll see a one-time notification about these features when you first launch the app
-
-This helps us improve Sentry Studio while keeping everything private and transparent.
+Vehicle SEI telemetry, GPS maps, and export overlays remain available. Map tiles,
+cloud storage, and user-initiated sharing and support still use their respective
+network services.
 
 📄 **[Privacy Policy](https://sentry-six.com/privacy)** · **[Terms of Service](https://sentry-six.com/terms)**
 

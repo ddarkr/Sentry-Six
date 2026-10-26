@@ -100,7 +100,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // Event listeners
   on: (channel, callback) => {
-    const allowedChannels = ['export:progress', 'share:progress', 'update:available', 'update:progress', 'update:downloaded', 'update:forceManual'];
+    const allowedChannels = ['export:progress', 'share:progress', 'update:available', 'update:progress', 'update:downloaded'];
     if (allowedChannels.includes(channel)) {
       const wrapper = (event, ...args) => callback(...args);
       listenerWrappers.set(callback, wrapper);

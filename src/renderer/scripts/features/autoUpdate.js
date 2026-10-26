@@ -292,61 +292,6 @@ function showUpdateDownloadedState() {
 }
 
 /**
- * Show the force manual update modal (killswitch activated)
- * This is a critical alert that requires manual download
- * @param {Object} info - Force manual update info from server
- */
-function showForceManualModal(info) {
-    getElements();
-    if (!updateModal) return;
-    
-    // Display version info
-    if (currentVersionDisplay) currentVersionDisplay.textContent = info.currentVersion || '---';
-    if (latestVersionDisplay) latestVersionDisplay.textContent = info.new_version || '---';
-    
-    // Reset state
-    if (updateProgress) updateProgress.classList.add('hidden');
-    
-    // Show critical message in changelog area
-    if (changelogContent) {
-        changelogContent.innerHTML = `
-            <div class="force-manual-alert">
-                <div class="force-manual-icon"><span class="material-symbols-outlined">warning</span></div>
-                <div class="force-manual-title">Critical Update Required</div>
-                <div class="force-manual-message">${info.message || 'A critical update is required. Please download the latest version manually.'}</div>
-            </div>
-        `;
-    }
-    
-    // Replace footer with download button only (no "Update Now" or "Later")
-    if (updateModalFooter) {
-        updateModalFooter.innerHTML = `
-            <button id="forceManualDownloadBtn" class="btn btn-primary btn-critical">
-                <span class="material-symbols-outlined mi-sm">download</span>
-                Download from GitHub
-            </button>
-        `;
-        updateModalFooter.style.display = '';
-        
-        const downloadBtn = document.getElementById('forceManualDownloadBtn');
-        if (downloadBtn) {
-            downloadBtn.addEventListener('click', () => {
-                const downloadUrl = info.download_url || 'https://github.com/Sentry-Six/Sentry-Six/releases/latest';
-                if (window.electronAPI?.openExternal) {
-                    window.electronAPI.openExternal(downloadUrl);
-                }
-            });
-        }
-    }
-    
-    // Add critical styling to modal
-    updateModal.querySelector('.update-modal')?.classList.add('critical-update');
-    
-    // Show modal (cannot be dismissed by clicking outside)
-    updateModal.classList.remove('hidden');
-}
-
-/**
  * Initialize the auto-update system
  */
 export function initAutoUpdate() {
@@ -359,13 +304,6 @@ export function initAutoUpdate() {
             console.log('Update available:', updateInfo);
             showUpdateModal(updateInfo);
         });
-        
-        // Listen for force manual update (killswitch)
-        window.electronAPI.on('update:forceManual', (info) => {
-            console.log('Force manual update required (killswitch):', info);
-            showForceManualModal(info);
-        });
-        
         // Listen for update progress
         window.electronAPI.on('update:progress', (progress) => {
             getElements();
@@ -402,12 +340,11 @@ export function initAutoUpdate() {
         installUpdateBtn.addEventListener('click', handleInstallUpdate);
     }
     
-    // Close modal when clicking outside (but not during, after update, or critical update)
+    // Close modal when clicking outside (but not during or after update)
     if (updateModal) {
         updateModal.addEventListener('click', (e) => {
             const isUpdating = updateModal.querySelector('.update-modal')?.classList.contains('updating');
-            const isCritical = updateModal.querySelector('.update-modal')?.classList.contains('critical-update');
-            if (e.target === updateModal && !updateComplete && !isUpdating && !isCritical) {
+            if (e.target === updateModal && !updateComplete && !isUpdating) {
                 hideUpdateModal();
             }
         });

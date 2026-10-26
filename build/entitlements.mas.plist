@@ -16,7 +16,7 @@
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
 
-    <!-- Required for native Node addons (canvas, node-machine-id) -->
+    <!-- Required for native Node addons -->
     <!-- Review Note: Native modules loaded at runtime require this -->
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
@@ -27,7 +27,7 @@
     <true/>
 
     <!-- Required for outbound network access -->
-    <!-- Used for: map tile fetching, Sentry Studio share/upload feature, anonymous version telemetry -->
+    <!-- Used for: map tile fetching, Sentry Studio share/upload feature -->
     <key>com.apple.security.network.client</key>
     <true/>
 </dict>
