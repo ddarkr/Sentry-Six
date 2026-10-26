@@ -269,3 +269,74 @@ test('exact selected source boundaries follow actual source end without probing 
     expect(await c.nativeVideo.ensureExportDurations(60, 120)).toEqual({ startSec: 60, endSec: 63 });
     expect(c.probeSegmentDurations.mock.calls.map(([groups]) => groups[0].id)).toEqual([1]);
 });
+
+function confirmedDurationFixture() {
+    const pending = [];
+    const group = { filesByCamera: new Map([['front', {
+        file: { isRemote: true, isElectronFile: true, path: 'remote-a' }
+    }]]) };
+    const video = { src: 'remote-a', currentSrc: 'remote-a', duration: 17 };
+    const context = vm.createContext({
+        state: { collection: { active: { groups: [group] } } },
+        nativeVideo: { master: video, currentSegmentIdx: 0, segmentDurations: [60], cumulativeStarts: [0, 60] },
+        videoMain: video, progressBar: {}, playBtn: {}, filePathToUrl: value => value,
+        File: class {}, DOMException, setTimeout, clearTimeout,
+        console: { log() {}, warn() {} },
+        document: { createElement() {
+            return { load() {}, set src(value) { if (value) pending.push(this); } };
+        } }
+    });
+    vm.runInContext(source.slice(source.indexOf('const confirmedRemoteDurations ='),
+        source.indexOf('\nfunction initNativeVideoPlayback()')), context);
+    vm.runInContext(source.slice(source.indexOf('function onMasterLoaded()'),
+        source.indexOf('\nfunction onMasterEnded()')), context);
+    const settle = (duration, error = false) => {
+        const media = pending.shift();
+        media.duration = duration;
+        if (error) media.onerror(); else media.onloadedmetadata();
+    };
+    return { context, group, video, pending, settle };
+}
+
+test('loaded remote durations are reused only for the same preferred source identity and path', async () => {
+    const { context: c, group, video, pending, settle } = confirmedDurationFixture();
+    c.onMasterLoaded();
+    expect(await c.nativeVideo.ensureExportDurations(0, 17)).toEqual({ startSec: 0, endSec: 17 });
+    expect(pending).toEqual([]);
+    const file = group.filesByCamera.get('front').file;
+    file.path = 'remote-b';
+    const changed = c.nativeVideo.ensureExportDurations(0, 17);
+    settle(12);
+    expect(await changed).toEqual({ startSec: 0, endSec: 12 });
+    expect(await c.nativeVideo.ensureExportDurations(0, 12)).toEqual({ startSec: 0, endSec: 12 });
+    expect(pending).toEqual([]);
+    group.filesByCamera.get('front').file = { ...file };
+    const replaced = c.nativeVideo.ensureExportDurations(0, 12);
+    settle(9);
+    expect(await replaced).toEqual({ startSec: 0, endSec: 9 });
+    video.src = video.currentSrc = 'unselected-camera';
+    video.duration = 30;
+    c.onMasterLoaded();
+    expect(await c.probeSegmentDurations([group], { strict: true })).toEqual([9]);
+});
+
+test('failed, invalid and estimated metadata never confirms a remote duration', async () => {
+    const { context: c, group, settle } = confirmedDurationFixture();
+    const failed = c.probeSegmentDurations([group], { strict: true });
+    settle(0, true);
+    await expect(failed).rejects.toThrow('Load error');
+    const estimated = c.probeSegmentDurations([group]);
+    settle(NaN);
+    expect(await estimated).toEqual([60]);
+    const invalid = c.probeSegmentDurations([group], { strict: true });
+    settle(NaN);
+    await expect(invalid).rejects.toThrow('Invalid remote video duration');
+    const valid = c.probeSegmentDurations([group], { strict: true });
+    settle(11);
+    expect(await valid).toEqual([11]);
+    expect(await c.probeSegmentDurations([group], { strict: true })).toEqual([11]);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(c.probeSegmentDurations([group], { strict: true, signal: controller.signal }))
+        .rejects.toMatchObject({ name: 'AbortError' });
+});

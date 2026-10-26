@@ -40,6 +40,7 @@ export function initSteeringWheel(playbackRateGetter) {
  */
 export function smoothSteeringTo(targetAngle) {
     steeringTarget = targetAngle;
+    if (steeringPosition === steeringTarget && lastAppliedAngle !== null) return;
     
     // Start animation loop if not already running
     if (!steeringAnimationId) {

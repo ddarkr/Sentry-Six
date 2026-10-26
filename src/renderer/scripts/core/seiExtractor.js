@@ -76,8 +76,115 @@ async function extractSeiFromFile(file) {
 // be returned by reference.
 const SEI_CACHE_MAX = 8;
 const seiCache = new Map();
+const remoteJobs = new Map();
+
+function remoteExtraction(key, { signal, beforeRead, onProgress }) {
+    let job = remoteJobs.get(key);
+    const isNew = !job;
+    if (!job) {
+        job = { controller: new AbortController(), subscribers: new Set(), progress: null };
+        remoteJobs.set(key, job);
+    }
+    const promise = new Promise((resolve, reject) => {
+        const subscriber = { resolve, reject, onProgress, beforeRead };
+        subscriber.finish = (error, result) => {
+            if (!job.subscribers.delete(subscriber)) return;
+            signal?.removeEventListener('abort', abort);
+            if (job.gateOwner === subscriber) job.releaseGate?.();
+            if (error) reject(error);
+            else resolve(result);
+            if (!job.subscribers.size && remoteJobs.get(key) === job) {
+                remoteJobs.delete(key);
+                job.controller.abort();
+            }
+        };
+        const abort = () => subscriber.finish(signal.reason || new DOMException('Aborted', 'AbortError'));
+        job.subscribers.add(subscriber);
+        signal?.addEventListener('abort', abort, { once: true });
+        if (job.progress) notify(subscriber, job.progress);
+    });
+
+    function notify(subscriber, progress) {
+        try {
+            const pending = subscriber.onProgress?.(progress);
+            if (pending?.then) Promise.resolve(pending).catch(error => subscriber.finish(error));
+        } catch (error) {
+            subscriber.finish(error);
+        }
+    }
+
+    if (isNew) {
+        const sharedSignal = job.controller.signal;
+        (async () => {
+            // Joiners keep the active playback gate; departing owners hand it off.
+            while (job.subscribers.size) {
+                const owner = job.subscribers.values().next().value;
+                if (!owner.beforeRead) break;
+                const gateController = new AbortController();
+                const abortGate = () => gateController.abort(sharedSignal.reason);
+                sharedSignal.addEventListener('abort', abortGate, { once: true });
+                job.gateOwner = owner;
+                const detached = new Promise(resolve => {
+                    job.releaseGate = () => {
+                        resolve(false);
+                        gateController.abort();
+                    };
+                });
+                let ready;
+                try {
+                    ready = await Promise.race([
+                        detached,
+                        Promise.resolve(owner.beforeRead(gateController.signal)).then(() => true)
+                    ]);
+                } finally {
+                    sharedSignal.removeEventListener('abort', abortGate);
+                    gateController.abort();
+                    job.gateOwner = null;
+                    job.releaseGate = null;
+                }
+                if (ready) break;
+            }
+            if (sharedSignal.aborted) throw sharedSignal.reason;
+            if (!window.DashcamMP4 || !window.DashcamHelpers) throw new Error('Telemetry parser unavailable');
+            const { SeiMetadata } = await window.DashcamHelpers.initProtobuf();
+            if (sharedSignal.aborted) throw sharedSignal.reason;
+            const mapPath = [];
+            let mappedFrames = 0;
+            const seiData = await extractRemoteFrames(key, SeiMetadata, sharedSignal, {
+                onProgress: ({ frames, processedUntilMs }) => {
+                    for (; mappedFrames < frames.length; mappedFrames++) {
+                        const { timestampMs, sei } = frames[mappedFrames];
+                        if (!hasValidGps(sei)) continue;
+                        const apState = sei.autopilotState ?? sei.autopilot_state;
+                        mapPath.push({
+                            lat: Number(sei.latitudeDeg ?? sei.latitude_deg),
+                            lon: Number(sei.longitudeDeg ?? sei.longitude_deg),
+                            timestampMs,
+                            autopilot: apState != null && apState !== 0 && apState !== 'DISABLED'
+                        });
+                    }
+                    job.progress = { seiData: frames, mapPath, processedUntilMs };
+                    for (const subscriber of job.subscribers) notify(subscriber, job.progress);
+                }
+            });
+            if (sharedSignal.aborted) throw sharedSignal.reason;
+            const result = { seiData, mapPath };
+            seiCache.set(key, result);
+            if (seiCache.size > SEI_CACHE_MAX) seiCache.delete(seiCache.keys().next().value);
+            return result;
+        })().then(result => {
+            if (remoteJobs.get(key) === job) remoteJobs.delete(key);
+            for (const subscriber of job.subscribers) subscriber.finish(null, result);
+        }, error => {
+            if (remoteJobs.get(key) === job) remoteJobs.delete(key);
+            for (const subscriber of job.subscribers) subscriber.finish(error);
+        });
+    }
+    return promise;
+}
 
 function seiCacheKey(entry) {
+    if (isRcloneStreamUrl(entry?.file?.path)) return entry.file.path;
     if (entry?.file?.isElectronFile && entry.file?.path) return entry.file.path;
     const f = entry?.file;
     if (f instanceof File) return `${f.name}|${f.size}|${f.lastModified}`;
@@ -89,9 +196,13 @@ function seiCacheKey(entry) {
  * Results are cached (bounded LRU) so revisiting a recent segment is instant.
  * @param {Object} entry - Clip entry with file property
  * @param {string} seiType - SEI type identifier
- * @param {Object} options - Optional signal, beforeRead gate and onProgress({seiData, mapPath, processedUntilMs}).
+ * @param {Object} options - Optional subscriber signal, beforeRead(gateSignal) gate and onProgress({seiData, mapPath, processedUntilMs}).
  * Progress arrays are shared and append-only; consumers must not mutate them.
  * Remote progress covers parsed video frames even when they contain no SEI.
+ * Concurrent remote callers share a read. Aborting or failing a progress callback
+ * removes only that caller; the last departure aborts the read. The initial gate
+ * cannot be bypassed by joiners. Its owner's departure cancels that gate and
+ * selects a survivor's gate; gate rejection otherwise rejects the shared job.
  * @returns {Promise<{seiData: Array, mapPath: Array}>}
  */
 export async function extractSeiFromEntry(entry, seiType, { signal, beforeRead, onProgress } = {}) {
@@ -110,29 +221,7 @@ export async function extractSeiFromEntry(entry, seiType, { signal, beforeRead, 
     let result = { seiData: [], mapPath: [] };
 
     if (isRcloneStreamUrl(entry.file?.path)) {
-        await beforeRead?.();
-        if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError');
-        if (!window.DashcamMP4 || !window.DashcamHelpers) throw new Error('Telemetry parser unavailable');
-        const { SeiMetadata } = await window.DashcamHelpers.initProtobuf();
-        const mapPath = [];
-        let mappedFrames = 0;
-        const seiData = await extractRemoteFrames(entry.file.path, SeiMetadata, signal, {
-            onProgress: ({ frames, processedUntilMs }) => {
-                for (; mappedFrames < frames.length; mappedFrames++) {
-                    const { timestampMs, sei } = frames[mappedFrames];
-                    if (!hasValidGps(sei)) continue;
-                    const apState = sei.autopilotState ?? sei.autopilot_state;
-                    mapPath.push({
-                        lat: Number(sei.latitudeDeg ?? sei.latitude_deg),
-                        lon: Number(sei.longitudeDeg ?? sei.longitude_deg),
-                        timestampMs,
-                        autopilot: apState != null && apState !== 0 && apState !== 'DISABLED'
-                    });
-                }
-                if (!signal?.aborted) onProgress?.({ seiData: frames, mapPath, processedUntilMs });
-            }
-        });
-        result = { seiData, mapPath };
+        return remoteExtraction(cacheKey, { signal, beforeRead, onProgress });
     } else if (entry.file?.isElectronFile && entry.file?.path) {
         try {
             const fileUrl = filePathToUrl(entry.file.path);

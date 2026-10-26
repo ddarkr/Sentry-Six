@@ -3,9 +3,12 @@
  * Handles dashboard overlay visibility toggle
  */
 
+import { stopSteeringAnimation } from './steeringWheel.js';
+
 // Dependencies set via init
 let getDashboardVis = null;
 let getState = null;
+let refresh = null;
 
 /**
  * Initialize dashboard visibility module with dependencies
@@ -14,6 +17,7 @@ let getState = null;
 export function initDashboardVisibility(deps) {
     getDashboardVis = deps.getDashboardVis;
     getState = deps.getState;
+    refresh = deps.refresh;
 }
 
 /**
@@ -43,4 +47,6 @@ export function updateDashboardVisibility() {
     } else {
         dashboardVis.classList.toggle('user-hidden', !enabled);
     }
+    if (enabled) refresh?.();
+    else stopSteeringAnimation();
 }

@@ -399,20 +399,7 @@ let useMetric = false; // Will be loaded from settings
         playbackBuffering.render();
         console.log('Language changed to:', lang);
         
-        // Update speed unit labels
-        if (speedUnit) speedUnit.textContent = t('ui.dashboard.' + (useMetric ? 'kmh' : 'mph'));
-        if (speedUnitCompact) speedUnitCompact.textContent = t('ui.dashboard.' + (useMetric ? 'kmh' : 'mph'));
-        
-        // Update "Manual" / "No Data" text if currently displayed
-        if (apText && apText.textContent === 'Manual') {
-            apText.textContent = t('ui.dashboard.manual');
-        } else if (apText && apText.textContent === 'No Data') {
-            apText.textContent = t('ui.dashboard.noData');
-        }
-        
-        if (apTextCompact && apTextCompact.textContent === 'Manual') {
-            apTextCompact.textContent = t('ui.dashboard.manual');
-        }
+        refreshVisualization();
         
         // Update clip browser subtitle with proper translation
         if (!library.folderLabel) {
@@ -760,9 +747,7 @@ let useMetric = false; // Will be loaded from settings
             if (window.electronAPI?.setSetting) {
                 window.electronAPI.setSetting('useMetric', useMetric);
             }
-            // Update speed unit display for both dashboards
-            if (speedUnit) speedUnit.textContent = useMetric ? 'KM/H' : 'MPH';
-            if (speedUnitCompact) speedUnitCompact.textContent = useMetric ? 'KM/H' : 'MPH';
+            refreshVisualization();
         };
     }
 
@@ -798,7 +783,7 @@ let useMetric = false; // Will be loaded from settings
             useMetric = saved === true;
             const metricToggle = $('metricToggle');
             if (metricToggle) metricToggle.checked = useMetric;
-            if (speedUnit) speedUnit.textContent = useMetric ? 'KM/H' : 'MPH';
+            refreshVisualization();
         });
         window.electronAPI.getSetting('accelPedMode').then(saved => {
             const mode = saved || 'iconbar';
@@ -1264,7 +1249,8 @@ initMultiCamFocus({
 
 initDashboardVisibility({
     getDashboardVis: () => dashboardVis,
-    getState: () => state
+    getState: () => state,
+    refresh: refreshVisualization
 });
 
 initMapVisualization({
@@ -3855,28 +3841,45 @@ async function showCollectionAtMs(ms) {
     showFrame(idx);
 }
 
+function refreshVisualization() {
+    let sei;
+    if (state.ui.nativeVideoMode) {
+        const timeMs = ((nativeVideo.master || videoMain)?.currentTime || 0) * 1000;
+        sei = timeMs <= nativeVideo.seiParsedUntilMs ? findSeiAtTime(nativeVideo.seiData, timeMs) : null;
+    } else {
+        sei = player.frames?.[+progressBar.value]?.sei;
+    }
+    if (sei) updateVisualization(sei);
+    else resetDashboardElements();
+}
+
 // Visualization Logic - support both camelCase (protobufjs) and snake_case
 function updateVisualization(sei) {
     if (!sei) return;
 
-    // This runs at ~60Hz during playback — skip all DOM work when the user
-    // has hidden both overlays it feeds.
+    // Dashboard and map visibility are independent.
     const dashOn = !!state?.ui?.dashboardEnabled;
     const mapOn = !!state?.ui?.mapEnabled;
     if (!dashOn && !mapOn) return;
+    if (mapOn) updateMapMarker(sei, hasValidGps);
+    if (!dashOn) {
+        stopSteeringAnimation();
+        return;
+    }
 
     // Helper to get field value (supports both naming conventions)
     const get = (camel, snake) => sei[camel] ?? sei[snake];
 
     // Speed (use absolute value to avoid negative display when in reverse)
     const mps = Math.abs(get('vehicleSpeedMps', 'vehicle_speed_mps') || 0);
-    const speed = useMetric ? Math.round(mps * MPS_TO_KMH) : Math.round(mps * MPS_TO_MPH);
+    const speed = String(useMetric ? Math.round(mps * MPS_TO_KMH) : Math.round(mps * MPS_TO_MPH));
     
     // Speed
-    if (speedValue) speedValue.textContent = speed;
-    if (speedUnit) speedUnit.textContent = useMetric ? 'KM/H' : 'MPH';
-    if (speedValueCompact) speedValueCompact.textContent = speed;
-    if (speedUnitCompact) speedUnitCompact.textContent = useMetric ? 'KM/H' : 'MPH';
+    if (speedValue && speedValue.textContent !== speed) speedValue.textContent = speed;
+    const unit = t('ui.dashboard.' + (useMetric ? 'kmh' : 'mph'));
+    if (speedUnit && speedUnit.textContent !== unit) speedUnit.textContent = unit;
+    if (speedValueCompact && speedValueCompact.textContent !== speed) speedValueCompact.textContent = speed;
+    if (speedUnitCompact && speedUnitCompact.textContent !== unit) speedUnitCompact.textContent = unit;
 
     // Gear
     const gear = get('gearState', 'gear_state');
@@ -3886,8 +3889,8 @@ function updateVisualization(sei) {
     else if (gear === 2) gearText = 'Reverse';
     else if (gear === 3) gearText = 'Neutral';
     
-    if (gearState) gearState.textContent = gearText;
-    if (gearStateCompact) gearStateCompact.textContent = gearText;
+    if (gearState && gearState.textContent !== gearText) gearState.textContent = gearText;
+    if (gearStateCompact && gearStateCompact.textContent !== gearText) gearStateCompact.textContent = gearText;
 
     // Blinkers - Tesla uses 400ms on / 300ms off (700ms cycle)
     const isCurrentlyPlaying = state.ui.nativeVideoMode ? nativeVideo.playing : player.playing;
@@ -3942,10 +3945,10 @@ function updateVisualization(sei) {
     else if (apState === 2) apTextContent = t('ui.dashboard.autosteer');
     else if (apState === 3) apTextContent = t('ui.dashboard.tacc');
     
-    if (apText) apText.textContent = apTextContent;
+    if (apText && apText.textContent !== apTextContent) apText.textContent = apTextContent;
     if (autosteerIconCompact) autosteerIconCompact.classList.toggle('active', isActive);
     if (apTextCompact) {
-        apTextCompact.textContent = apTextContent;
+        if (apTextCompact.textContent !== apTextContent) apTextCompact.textContent = apTextContent;
         apTextCompact.classList.toggle('active', isActive);
     }
     if (gearStateCompact) gearStateCompact.classList.toggle('active', isActive);
@@ -3972,14 +3975,14 @@ function updateVisualization(sei) {
     const lat = get('latitudeDeg', 'latitude_deg') || 0;
     const lon = get('longitudeDeg', 'longitude_deg') || 0;
     const heading = get('headingDeg', 'heading_deg') || 0;
-    const accX = get('linearAccelerationMps2X', 'linear_acceleration_mps2_x') || 0;
-    const accY = get('linearAccelerationMps2Y', 'linear_acceleration_mps2_y') || 0;
-    const accZ = get('linearAccelerationMps2Z', 'linear_acceleration_mps2_z') || 0;
-    
-    if (valSeq) valSeq.textContent = seqNo ?? '--';
-    if (valLat) valLat.textContent = lat.toFixed(6);
-    if (valLon) valLon.textContent = lon.toFixed(6);
-    if (valHeading) valHeading.textContent = heading.toFixed(1) + '°';
+    const seqText = String(seqNo ?? '--');
+    const latText = lat.toFixed(6);
+    const lonText = lon.toFixed(6);
+    const headingText = heading.toFixed(1) + '°';
+    if (valSeq && valSeq.textContent !== seqText) valSeq.textContent = seqText;
+    if (valLat && valLat.textContent !== latText) valLat.textContent = latText;
+    if (valLon && valLon.textContent !== lonText) valLon.textContent = lonText;
+    if (valHeading && valHeading.textContent !== headingText) valHeading.textContent = headingText;
     
     // Acceleration values (valAccX/Y/Z removed - elements don't exist in HTML)
     // G-force meter already displays this information
@@ -3990,9 +3993,6 @@ function updateVisualization(sei) {
     // Compass Update
     updateCompass(sei);
 
-    // Leaflet work (marker, pan, container transform) is not free even when
-    // the map panel is display:none — skip it entirely while hidden.
-    if (mapOn) updateMapMarker(sei, hasValidGps);
 }
 
 // Toggle Extra Data - prevent all event bubbling to avoid interfering with playback
@@ -4068,6 +4068,9 @@ const nativeVideo = {
     telemetryRafId: null    // requestAnimationFrame ID for ~60Hz telemetry polling
 };
 
+// File objects scope confirmations to the opened source; path checks reject reused objects.
+const confirmedRemoteDurations = new WeakMap();
+
 /**
  * Probe video durations for all segments upfront to enable accurate seek positioning.
  * Uses temporary video elements to get actual durations without full loading.
@@ -4101,7 +4104,13 @@ async function probeSegmentDurations(groups, { signal, strict = false } = {}) {
         // Prefer front camera for duration, fall back to any available camera
         const entry = group.filesByCamera.get('front') || 
                       group.filesByCamera.values().next().value;
+        const confirmed = entry?.file?.isRemote && confirmedRemoteDurations.get(entry.file);
+        if (confirmed && confirmed.path === entry.file.path) {
+            durations.push(confirmed.duration);
+            continue;
+        }
         const urlData = getVideoUrl(entry);
+        const sourcePath = entry?.file?.path;
         
         if (!urlData) {
             console.warn('No video file for segment', i, '- using 60s estimate');
@@ -4153,6 +4162,9 @@ async function probeSegmentDurations(groups, { signal, strict = false } = {}) {
                 tempVid.src = urlData.url;
             });
             
+            if (strict && entry.file?.isRemote && Number.isFinite(duration) && duration > 0) {
+                confirmedRemoteDurations.set(entry.file, { path: sourcePath, duration });
+            }
             durations.push(duration);
         } catch (err) {
             if (strict || err?.name === 'AbortError') throw err;
@@ -4351,6 +4363,12 @@ function onMasterLoaded() {
     if (!vid) return;
     
     const actualDuration = Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : 60;
+    const group = state.collection.active?.groups[nativeVideo.currentSegmentIdx];
+    const entry = group?.filesByCamera.get('front') || group?.filesByCamera.values().next().value;
+    if (entry?.file?.isRemote && Number.isFinite(vid.duration) && vid.duration > 0 &&
+        vid.src === filePathToUrl(entry.file.path) && vid.currentSrc === vid.src) {
+        confirmedRemoteDurations.set(entry.file, { path: entry.file.path, duration: vid.duration });
+    }
     const segIdx = nativeVideo.currentSegmentIdx || 0;
     
     // Update segment duration with actual value
@@ -4616,7 +4634,7 @@ async function loadNativeSegment(segIdx, { transition = false } = {}) {
     if (masterEntry && seiType) {
         extractSeiFromEntry(masterEntry, seiType, {
             signal: telemetrySignal,
-            beforeRead: () => waitForTelemetryBuffer(bufferSources, telemetrySignal),
+            beforeRead: signal => waitForTelemetryBuffer(bufferSources, signal),
             onProgress: ({ seiData, processedUntilMs }) => {
                 if (!isCurrent() || telemetrySignal.aborted) return;
                 nativeVideo.seiData = seiData;

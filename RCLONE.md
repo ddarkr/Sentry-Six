@@ -23,6 +23,8 @@ approximate until the relevant clip metadata is read. Telemetry reads only the
 current or explicitly requested master clip, but may read that entire clip
 incrementally to extract SEI data. Streaming is not a promise of minimal upstream
 traffic: video buffering, telemetry and repeated seeks can transfer extra bytes.
+Confirmed remote durations are reused by later editor/export range checks for
+the same opened file and path; estimates and failed metadata reads are not reused.
 
 For the active remote clip, uncached telemetry extraction waits until each active
 camera has two seconds buffered ahead, or the remaining clip duration if shorter.
@@ -31,6 +33,9 @@ incrementally; seeking beyond the parsed portion clears old readings until that
 portion is available. Full route polylines still wait for extraction to finish.
 This is an initial buffer gate, not continuous bandwidth management, and does
 not reduce the bytes required for a complete telemetry scan.
+Concurrent playback, editor and export requests for the same remote clip share
+one telemetry scan. Cancelling one consumer does not cancel the others; the last
+consumer leaving stops the scan. Replacement sources have separate identities.
 
 During remote playback, the line below the timeline distinguishes loading,
 buffering, seeking, readiness and playback errors. Buffered-ahead seconds are
@@ -45,6 +50,9 @@ switching segments or sources clears the previous regions.
 Automatic camera drift correction waits while the master or follower is seeking
 or lacks future playback data, rather than issuing another seek into an unready
 buffer. Explicit timeline seeks still reposition the cameras immediately.
+Hidden dashboards skip telemetry rendering while map updates remain independent.
+Showing the dashboard again refreshes current telemetry, units and language even
+while paused; a settled steering wheel does not keep scheduling animation frames.
 
 Export stages only the original files needed for the selected range and cameras
 in a private temporary directory, then removes them after success, cancellation

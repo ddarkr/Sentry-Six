@@ -180,6 +180,7 @@ authentication, tradeoffs and verification scope.
 - Brake/accelerator pedal data is not logged during Self Driving. Pedal activity while Autopilot/Self Driving is engaged indicates driver input.
 - A requested privacy blur must be applied successfully or the export stops. Invalid masks are not silently omitted.
 - FFmpeg discovery and encoder/resolution probes run asynchronously. Failed or cancelled Leaflet minimap rendering releases its hidden window and encoder process.
+- Collection playback corrects camera drift and ignores telemetry from superseded clip loads. SEI parsing reads video payloads without duplicating them.
 
 ## Project Origin & Credits
 

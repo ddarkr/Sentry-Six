@@ -117,7 +117,7 @@ class DashcamMP4 {
             if (len < 1 || cursor + len > end) break;
 
             const type = this.view.getUint8(cursor) & 0x1F;
-            const data = new Uint8Array(this.buffer.slice(cursor, cursor + len));
+            const data = new Uint8Array(this.buffer, cursor, len);
 
             if (type === 7) currentSps = data; // SPS
             else if (type === 8) currentPps = data; // PPS

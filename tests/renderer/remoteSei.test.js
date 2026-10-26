@@ -30,7 +30,7 @@ function environment(data, { controller, abortDuringRead = false, truncate = fal
     const requests = [];
     const reads = [];
     const context = vm.createContext({
-        window: {}, Uint8Array, DataView, DOMException, console,
+        window: {}, Uint8Array, DataView, DOMException, AbortController, console,
         fetch: async (url, { headers }) => {
             requests.push(url);
             const [, a, b] = /^bytes=(\d+)-(\d+)$/.exec(headers.Range);
@@ -216,4 +216,155 @@ test('remote reads wait for playback while completed cache hits bypass the gate'
     controller.abort(); release();
     await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
     expect(requests).toEqual([]);
+});
+
+test('concurrent consumers share the initial playback gate and survive its owner aborting', async () => {
+    const { context, requests } = environment(fixture());
+    loadExtractor(context);
+    const entry = { file: { path: 'shared-gate' } };
+    const controller = new AbortController();
+    let release, sharedSignal;
+    const first = context.extractSeiFromEntry(entry, null, {
+        signal: controller.signal,
+        beforeRead: signal => {
+            sharedSignal = signal;
+            return new Promise(resolve => { release = resolve; });
+        }
+    });
+    const rejected = expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    const second = context.extractSeiFromEntry(entry);
+    await Promise.resolve();
+    expect(requests).toEqual([]);
+    controller.abort();
+    await rejected;
+    expect(sharedSignal.aborted).toBe(true);
+    expect(requests).toEqual([]);
+    const result = await second;
+    release(); // An unresolved obsolete gate must not strand the survivor.
+    expect(result.seiData.map(frame => frame.sei.value)).toEqual([23, 24]);
+    const count = requests.length;
+    expect(await context.extractSeiFromEntry(entry)).toBe(result);
+    expect(requests).toHaveLength(count);
+});
+
+test('late listeners receive current coverage and one subscriber abort does not stop shared ranges', async () => {
+    const { context, reads } = environment(fixture());
+    loadExtractor(context);
+    const entry = { file: { path: 'shared-progress' } };
+    const controller = new AbortController();
+    let late, firstCoverage;
+    const lateProgress = [];
+    const first = context.extractSeiFromEntry(entry, null, {
+        signal: controller.signal,
+        onProgress: progress => {
+            firstCoverage = progress.processedUntilMs;
+            late = context.extractSeiFromEntry(entry, null, {
+                onProgress: value => lateProgress.push({
+                    coverage: value.processedUntilMs, count: value.seiData.length
+                })
+            });
+            controller.abort();
+        }
+    });
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    const result = await late;
+    expect(lateProgress[0]).toEqual({ coverage: firstCoverage, count: 1 });
+    expect(lateProgress[lateProgress.length - 1]).toEqual({ coverage: 90, count: 2 });
+    expect(result.seiData.map(frame => frame.sei.value)).toEqual([23, 24]);
+    // A single parser reads each metadata/range offset only once.
+    expect(new Set(reads.map(read => `${read.start}-${read.end}`)).size).toBe(reads.length);
+});
+
+test('last subscriber abort releases a pending gate immediately and old cleanup cannot remove its replacement', async () => {
+    const { context, requests } = environment(fixture());
+    loadExtractor(context);
+    const entry = { file: { path: 'replace-aborted' } };
+    const controller = new AbortController();
+    let release, oldSignal;
+    const old = context.extractSeiFromEntry(entry, null, {
+        signal: controller.signal,
+        beforeRead: signal => {
+            oldSignal = signal;
+            return new Promise(resolve => { release = resolve; });
+        }
+    });
+    const rejected = expect(old).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort();
+    await rejected;
+    expect(oldSignal.aborted).toBe(true);
+    const replacement = context.extractSeiFromEntry(entry);
+    release();
+    const joined = context.extractSeiFromEntry(entry);
+    const result = await replacement;
+    expect((await joined).seiData.map(frame => frame.sei.value)).toEqual([23, 24]);
+    expect(await context.extractSeiFromEntry(entry)).toBe(result);
+});
+
+test('gate failure rejects shared consumers and permits a fresh successful extraction', async () => {
+    const { context, requests } = environment(fixture());
+    loadExtractor(context);
+    const entry = { file: { path: 'failed-gate' } };
+    let rejectGate;
+    const first = context.extractSeiFromEntry(entry, null, {
+        beforeRead: () => new Promise((resolve, reject) => { rejectGate = reject; })
+    });
+    const second = context.extractSeiFromEntry(entry);
+    const failures = Promise.all([
+        expect(first).rejects.toThrow('Gate failed'),
+        expect(second).rejects.toThrow('Gate failed')
+    ]);
+    rejectGate(new Error('Gate failed'));
+    await failures;
+    expect(requests).toEqual([]);
+    expect((await context.extractSeiFromEntry(entry)).seiData.map(frame => frame.sei.value)).toEqual([23, 24]);
+});
+
+test.each([false, true])('progress callback failure only rejects its subscriber (async=%s)', async asynchronous => {
+    const { context } = environment(fixture());
+    loadExtractor(context);
+    const entry = { file: { path: 'callback-failure' } };
+    const first = context.extractSeiFromEntry(entry, null, {
+        onProgress: () => {
+            if (asynchronous) return Promise.reject(new Error('Listener failed'));
+            throw new Error('Listener failed');
+        }
+    });
+    const second = context.extractSeiFromEntry(entry);
+    await expect(first).rejects.toThrow('Listener failed');
+    expect((await second).seiData.map(frame => frame.sei.value)).toEqual([23, 24]);
+});
+
+test('departing playback owner hands off to a surviving playback gate', async () => {
+    const { context, requests } = environment(fixture());
+    loadExtractor(context);
+    const entry = { file: { path: 'gate-handoff' } };
+    const controller = new AbortController();
+    let oldSignal, nextSignal, release, started;
+    const gateStarted = new Promise(resolve => { started = resolve; });
+    const first = context.extractSeiFromEntry(entry, null, {
+        signal: controller.signal,
+        beforeRead: signal => {
+            oldSignal = signal;
+            return new Promise((resolve, reject) => {
+                signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+            });
+        }
+    });
+    const second = context.extractSeiFromEntry(entry, null, {
+        beforeRead: signal => {
+            nextSignal = signal;
+            started();
+            return new Promise(resolve => { release = resolve; });
+        }
+    });
+    const rejected = expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort();
+    await rejected;
+    await gateStarted;
+    expect(oldSignal.aborted).toBe(true);
+    expect(nextSignal.aborted).toBe(false);
+    expect(requests).toEqual([]);
+    release();
+    expect((await second).seiData.map(frame => frame.sei.value)).toEqual([23, 24]);
+    expect(nextSignal.aborted).toBe(true);
 });
