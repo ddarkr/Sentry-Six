@@ -45,6 +45,7 @@ Not affiliated with Tesla, Inc. Unrelated to the Sentry (sentry.io) error-monito
     - Front, Back, B-Pillars (HW4/AI4+), Repeaters
   - Synced playback across all cameras
   - Focus on the details with speed controls, from half speed (0.5x) to 4x.
+  - Hover over the playback bar to preview the recording time at that position without seeking; the tooltip follows your 12/24-hour time preference.
  
 - **SEI Telemetry**
   - Visualize the car's actions

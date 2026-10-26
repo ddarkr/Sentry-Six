@@ -10,7 +10,7 @@ import { updateGForceMeter, resetGForceMeter } from './scripts/ui/gforceMeter.js
 import { updateCompass, resetCompass } from './scripts/ui/compass.js';
 import { initKeybindActions, initKeybindSettings, initGlobalKeybindListener } from './scripts/lib/keybinds.js';
 import { initSteeringWheel, smoothSteeringTo, stopSteeringAnimation, resetSteeringWheel } from './scripts/ui/steeringWheel.js';
-import { formatTimeHMS, updateTimeDisplayNew, updateRecordingTime } from './scripts/ui/timeDisplay.js';
+import { formatTimeHMS, updateTimeDisplayNew, updateRecordingTime, getTimelineHoverTime } from './scripts/ui/timeDisplay.js';
 import { 
     exportState, initExportModule, setExportMarker, updateExportMarkers, 
     updateExportButtonState, openExportModal, closeExportModal, reopenExportModal,
@@ -3609,6 +3609,32 @@ progressBar.addEventListener('pointerdown', () => {
 });
 progressBar.addEventListener('pointerup', () => { state.ui.isScrubbing = false; maybeAutoplayAfterSeek(); });
 progressBar.addEventListener('pointercancel', () => { state.ui.isScrubbing = false; });
+
+const timelineHoverTime = $('timelineHoverTime');
+progressBar.addEventListener('pointermove', (event) => {
+    if (progressBar.disabled || event.pointerType === 'touch') {
+        timelineHoverTime.hidden = true;
+        return;
+    }
+    const rect = progressBar.getBoundingClientRect();
+    // The 14px thumb's centre travels between 7px insets, matching native range seeking.
+    const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left - 7) / Math.max(1, rect.width - 14)));
+    const text = getTimelineHoverTime(state, nativeVideo, fraction);
+    timelineHoverTime.textContent = text;
+    timelineHoverTime.hidden = !text;
+    if (!text) return;
+    const container = progressBar.parentElement.getBoundingClientRect();
+    const halfWidth = timelineHoverTime.offsetWidth / 2;
+    const x = event.clientX - container.left;
+    timelineHoverTime.style.left = `${Math.max(halfWidth, Math.min(container.width - halfWidth, x))}px`;
+});
+const hideTimelineHoverTime = () => { timelineHoverTime.hidden = true; };
+progressBar.addEventListener('pointerleave', hideTimelineHoverTime);
+progressBar.addEventListener('pointercancel', hideTimelineHoverTime);
+window.addEventListener('blur', hideTimelineHoverTime);
+document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') hideTimelineHoverTime();
+});
 
 // Keyboard controls
 document.addEventListener('keydown', (e) => {

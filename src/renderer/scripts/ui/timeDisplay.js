@@ -62,6 +62,42 @@ function formatTimeWithPreference(hours, minutes, seconds, timeFormat) {
     }
 }
 
+function formatRecordingTime(group, positionSeconds) {
+    const filename = group?.filesByCamera?.values().next().value?.file?.name;
+    const match = (group?.timestampKey || filename || '').match(/\d{4}-\d{2}-\d{2}_(\d{2})-(\d{2})-(\d{2})/);
+    if (!match || !Number.isFinite(positionSeconds)) return '';
+    const seconds = (Number(match[1]) * 3600 + Number(match[2]) * 60 +
+        Number(match[3]) + Math.floor(positionSeconds)) % 86400;
+    return formatTimeWithPreference(Math.floor(seconds / 3600), Math.floor(seconds % 3600 / 60),
+        seconds % 60, window._timeFormat || '12h');
+}
+
+// Map the same compressed segment timeline used by seeking, not elapsed wall time.
+export function getTimelineHoverTime(state, nativeVideo, fraction) {
+    const collection = state.collection.active;
+    let group = state.library.clipGroupById.get(state.selection.selectedGroupId);
+    let localSeconds;
+    if (collection) {
+        const native = state.ui.nativeVideoMode;
+        const starts = native ? nativeVideo.cumulativeStarts : collection.segmentStartsMs;
+        const duration = native ? starts?.[starts.length - 1] : collection.durationMs;
+        if (!starts?.length || !Number.isFinite(duration) || duration <= 0) return '';
+        const position = Math.max(0, Math.min(1, fraction)) * duration;
+        let index = 0;
+        while (index + 1 < collection.groups.length && starts[index + 1] <= position) index++;
+        group = collection.groups[index];
+        localSeconds = (position - starts[index]) / (native ? 1 : 1000);
+    } else if (state.ui.nativeVideoMode) {
+        localSeconds = fraction * nativeVideo.master?.duration;
+    } else {
+        const frames = state.player.frames;
+        const index = Math.round(fraction * ((frames?.length || 1) - 1));
+        localSeconds = frames?.[index]?.timestamp / 1000;
+    }
+    if (!Number.isFinite(localSeconds)) return '';
+    return formatRecordingTime(group, localSeconds) || formatTimeHMS(localSeconds);
+}
+
 /**
  * Update the recording time display from segment timestamp
  * @param {Object} opts - Options
@@ -76,38 +112,9 @@ export function updateRecordingTime(opts) {
     if (!timeText && !timeTextCompact) return;
     
     try {
-        const group = collection?.groups?.[segIdx];
-        if (!group) return;
-        
-        // Get any file from the group to extract timestamp
-        let filename = null;
-        if (group.filesByCamera) {
-            const iter = group.filesByCamera.values();
-            const first = iter.next();
-            if (first.value?.file?.name) filename = first.value.file.name;
-        }
-        if (!filename) return;
-        
-        // Tesla filename format: 2024-12-15_14-30-45-front.mp4
-        const match = filename.match(/(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/);
-        if (match) {
-            const [, , , , hour, min, sec] = match;
-            // Add current video position to the base timestamp
-            const vidSec = Math.floor(videoCurrentTime || 0);
-            
-            // Calculate actual time
-            let totalSeconds = parseInt(hour) * 3600 + parseInt(min) * 60 + parseInt(sec) + vidSec;
-            totalSeconds = totalSeconds % 86400; // Wrap at 24 hours
-            const h = Math.floor(totalSeconds / 3600);
-            const m = Math.floor((totalSeconds % 3600) / 60);
-            const s = totalSeconds % 60;
-            
-            // Use user's time format preference (default to 12h)
-            const timeFormat = window._timeFormat || '12h';
-            const formattedTime = formatTimeWithPreference(h, m, s, timeFormat);
-            if (timeText) timeText.textContent = formattedTime;
-            if (timeTextCompact) timeTextCompact.textContent = formattedTime;
-        }
+        const formattedTime = formatRecordingTime(collection?.groups?.[segIdx], videoCurrentTime || 0);
+        if (formattedTime && timeText) timeText.textContent = formattedTime;
+        if (formattedTime && timeTextCompact) timeTextCompact.textContent = formattedTime;
     } catch (e) {
         console.warn('updateRecordingTime error:', e);
     }

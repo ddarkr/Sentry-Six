@@ -2835,6 +2835,24 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     width: 100%;
 }
 
+.timeline-hover-time {
+    position: absolute;
+    bottom: calc(100% + 12px);
+    transform: translateX(-50%);
+    padding: 6px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--tooltip-bg);
+    color: var(--text-color);
+    box-shadow: 0 4px 12px var(--shadow-color);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 20;
+}
+
 .playback-buffer-status:not([hidden]) {
     position: absolute;
     top: calc(50% + 14px);
