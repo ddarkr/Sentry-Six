@@ -181,6 +181,7 @@ authentication, tradeoffs and verification scope.
 - A requested privacy blur must be applied successfully or the export stops. Invalid masks are not silently omitted.
 - FFmpeg discovery and encoder/resolution probes run asynchronously. Failed or cancelled Leaflet minimap rendering releases its hidden window and encoder process.
 - Collection playback corrects camera drift and ignores telemetry from superseded clip loads. SEI parsing reads video payloads without duplicating them.
+- SentryUSB routes and tags are parsed in one streaming pass. Unused route fields are discarded, but chronological grouping still retains the required route data in memory. Park-split drives retain their segment durations; files with no recognizable route timestamps produce an empty drive list.
 
 ## Project Origin & Credits
 

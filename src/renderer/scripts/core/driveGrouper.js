@@ -222,10 +222,9 @@ function splitClipAtParkGaps(clip, runs) {
         const endFrac = seg.endFrame / totalRawFrames;
         let startIdx = Math.round(startFrac * nPoints);
         let endIdx = Math.round(endFrac * nPoints);
-        if (startIdx >= nPoints) startIdx = nPoints - 1;
+        if (startIdx > nPoints) startIdx = nPoints;
         if (endIdx > nPoints) endIdx = nPoints;
         if (startIdx < 0) startIdx = 0;
-        if (endIdx <= startIdx) continue;
 
         // Create a sub-route with sliced parallel arrays.
         // CRITICAL: Must slice ALL parallel arrays (AP, accel, gear, speed) to keep
@@ -233,7 +232,7 @@ function splitClipAtParkGaps(clip, runs) {
         // discards all autopilot data for split routes.
         const subRoute = { ...clip };
         subRoute.Points = pts.slice(startIdx, endIdx);
-        if (!subRoute.Points) subRoute.points = pts.slice(startIdx, endIdx);
+        subRoute.points = subRoute.Points;
 
         // Slice AutopilotStates (decode base64 first, store as plain array for sub-route)
         const apRaw = clip.AutopilotStates ?? clip.autopilotStates;
@@ -288,6 +287,11 @@ function splitClipAtParkGaps(clip, runs) {
 
         const offsetDurationMs = Math.round(startFrac * CLIP_DURATION_MS);
         subRoute._startMs = clip._startMs + offsetDurationMs;
+        subRoute._endMs = clip._startMs + Math.round(endFrac * CLIP_DURATION_MS);
+        // Preserve the original sampling cadence rather than stretching each
+        // sliced array across a fresh minute (or across rounded frame bounds).
+        subRoute._pointStartMs = clip._startMs + (nPoints > 1 ? startIdx / (nPoints - 1) * CLIP_DURATION_MS : 0);
+        subRoute._pointStepMs = nPoints > 1 ? CLIP_DURATION_MS / (nPoints - 1) : 0;
 
         result.push({ route: subRoute, parked: false });
     }
@@ -453,7 +457,9 @@ function buildDrive(id, routes, driveTags) {
             const engaged = !!apVal;
 
             // Estimated timestamp for this point
-            const pointTimeMs = routeStartMs + (nPts > 1 ? (i / (nPts - 1)) * CLIP_DURATION_MS : 0);
+            const pointTimeMs = route._pointStartMs !== undefined
+                ? route._pointStartMs + i * route._pointStepMs
+                : routeStartMs + (nPts > 1 ? (i / (nPts - 1)) * CLIP_DURATION_MS : 0);
 
             // Gear state for this point
             const gearIdx = Math.min(i, gearArr ? gearArr.length - 1 : 0);
@@ -546,7 +552,8 @@ function buildDrive(id, routes, driveTags) {
 
     // Drive time bounds from clip filenames (local time - matches clip timestamps)
     const startMs = routes[0]._startMs;
-    const endMs = routes[routes.length - 1]._startMs + CLIP_DURATION_MS;
+    const lastRoute = routes[routes.length - 1];
+    const endMs = lastRoute._endMs ?? (lastRoute._startMs + CLIP_DURATION_MS);
     const durationMs = Math.max(0, endMs - startMs);
 
     // FSD % = engaged distance / total distance (matches Sentry-USB: distance-based).
