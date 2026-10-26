@@ -144,6 +144,14 @@ Join our [Discord Server](https://discord.com/invite/9QZEzVwdnt)!
 4. In your Sentry Studio folder, use the following command: `npm install`
 6. To run Sentry Studio, use `npm start`
 
+Alternatively, with pnpm 11, run `pnpm install` and `pnpm dev`. The repository's `pnpm-workspace.yaml` explicitly approves the five dependency installation scripts; other dependencies are not automatically approved. Use one package manager per checkout to avoid moving packages between installation layouts.
+
+Node.js 24.16.0 has a [known Electron archive-extraction regression](https://github.com/electron/electron/issues/51619): installation can finish without creating the Electron executable. If affected, use Node.js 24.15.0 (`nvm use 24.15.0`) and run `pnpm rebuild electron` before `pnpm dev`.
+
+### Development checks
+
+Run `npm test -- --runInBand` for the regression suite. CI runs it before packaging on Windows, macOS, and Linux. FFmpeg pixel-rendering checks use a locally installed `ffmpeg` (or `FFMPEG_TEST_PATH`) and are skipped when it is unavailable; they do not download binaries.
+
 Run `node_modules/.bin/electron tests/renderer/mapPanning.smoke.cjs` for the isolated, hidden-window Leaflet drag check. It verifies both orientation modes at five headings, a mode transition, and mouse release using the production pan handlers.
 
 ## Usage

@@ -1,10 +1,6 @@
 name: CI
 
-# Fast validation for every push and PR: proves the repo installs cleanly and
-# electron-builder can produce a packaged app on all three supported platforms.
-# This replaces the pre-March-30 ci.yml that also ran Jest tests; the Jest
-# framework was reverted along with other problematic commits, so this is the
-# build-verification half only.
+# Run regression tests and verify packaging on every push and pull request.
 
 on:
   push:
@@ -33,6 +29,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Run regression tests
+        run: npm test -- --runInBand
 
       - name: Verify build setup
         # --dir produces an unpacked app without building the installer (much faster
