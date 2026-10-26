@@ -328,6 +328,135 @@ describe('read-only remote browser', () => {
     await expect(listing).resolves.toMatchObject({ ok: false, error: { code: 'CANCELLED' } });
     await expect(handlers['rclone:remotes'](event)).resolves.toEqual({ ok: true, data: ['cloud'] });
   });
+  function footageBrowser(tree, type = 'local') {
+    const remote = JSON.stringify([{ name: 'cloud', type }]);
+    const reply = args => {
+      if (args[0] === 'listremotes') return remote;
+      const idIndex = args.indexOf('--drive-root-folder-id');
+      const key = idIndex >= 0 ? args[idIndex + 1] : args.at(-1).slice('cloud:'.length);
+      return JSON.stringify(tree[key] || []);
+    };
+    return browser(Array(200).fill(reply));
+  }
+  test('nested JSON resolves sibling TeslaCam across directories, not the loaded video, after refresh', async () => {
+    const second = filename.replace('12-30-00', '12-31-00');
+    const [b] = footageBrowser({
+      '': [entry('drive-data.json', 0, true), entry('TeslaCam', 0, true), entry('unrelated', 0, true)],
+      'drive-data.json': [entry('drive-data.json', 123)],
+      unrelated: [entry(filename.replace('12-30-00', '19-00-00'))],
+      TeslaCam: [entry('SavedClips', 0, true)],
+      'TeslaCam/SavedClips': [entry('2026-10-09_12-30-00', 0, true), entry('2026-10-09_12-31-00', 0, true)],
+      'TeslaCam/SavedClips/2026-10-09_12-30-00': [entry(filename), entry(filename.replace('-front', '-back'))],
+      'TeslaCam/SavedClips/2026-10-09_12-31-00': [entry(second)]
+    });
+    await b.listRemotes();
+    const rows = await b.list('cloud', '');
+    await b.open('cloud', rows.find(row => row.name === 'unrelated').folder);
+    const oldVideo = b.stream;
+    const data = await b.openDriveData('cloud', rows.find(row => row.name === 'drive-data.json').folder);
+    expect(b.stream).toBe(oldVideo);
+    expect(oldVideo.closed).toBe(false);
+    await b.listRemotes();
+    const result = await b.openDriveFootage(data.path, [filename, second]);
+    expect(result.files.map(file => file.name).sort()).toEqual([filename, filename.replace('-front', '-back'), second].sort());
+    expect(new Set(result.files.map(file => new URL(file.path).port)).size).toBe(2);
+    expect(oldVideo.closed).toBe(true);
+    for (const file of result.files) expect(b.stream.files.has(file.path)).toBe(true);
+    const session = b.stream;
+    b.cancel(true);
+    expect(session.closed).toBe(true);
+    await expect(b.stageForExport([result.files[0].path])).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+  test('missing remote footage never reuses an unrelated loaded manifest', async () => {
+    const [b] = footageBrowser({ '': [entry('drive-data.json', 123), entry(filename.replace('12-30-00', '19-00-00'))] });
+    await b.listRemotes();
+    await b.open('cloud', '');
+    const oldVideo = b.stream;
+    const data = await b.openDriveData('cloud', '');
+    expect(await b.openDriveFootage(data.path, [filename])).toBeNull();
+    expect(b.stream).toBe(oldVideo);
+    expect(oldVideo.closed).toBe(false);
+  });
+  test.each(['../' + filename, '/old-device/' + filename, 'a/../' + filename, 'C:\\TeslaCam\\' + filename, 'a//' + filename, 'event.json'])('rejects unsafe route reference %s', async route => {
+    const [b, spawn] = footageBrowser({ '': [entry('drive-data.json', 123)] });
+    await b.listRemotes();
+    const data = await b.openDriveData('cloud', '');
+    const before = spawn.mock.calls.length;
+    await expect(b.openDriveFootage(data.path, [route])).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(b.openDriveFootage(data.path + 'wrong', [filename])).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(spawn.mock.calls.length).toBe(before);
+  });
+  test('duplicate Google Drive folder names are rejected rather than guessed', async () => {
+    const dir = (name, ID) => ({ ...entry(name, 0, true), ID });
+    const [b] = footageBrowser({
+      '': [entry('drive-data.json', 123), dir('TeslaCam', 'first'), dir('TeslaCam', 'second')],
+      first: [entry(filename)], second: [entry(filename)]
+    }, 'drive');
+    await b.listRemotes();
+    const data = await b.openDriveData('cloud', '');
+    await expect(b.openDriveFootage(data.path, [filename])).rejects.toMatchObject({ code: 'AMBIGUOUS_FOLDER' });
+    expect(b.stream).toBeUndefined();
+  });
+  test('explicit relative route folders resolve by directory ID and survive tree refresh', async () => {
+    const dir = (name, ID) => ({ ...entry(name, 0, true), ID });
+    const [b, spawn] = footageBrowser({
+      '': [dir('archive', 'archive-id')],
+      'archive-id': [dir('drive-data.json', 'json-id'), dir('2026-10-09', 'day-id')],
+      'json-id': [entry('drive-data.json', 123)],
+      'day-id': [entry(filename), entry(filename.replace('-front', '-right_repeater'))]
+    }, 'drive');
+    await b.listRemotes();
+    const archive = (await b.list('cloud', ''))[0].folder;
+    const json = (await b.list('cloud', archive)).find(row => row.name === 'drive-data.json').folder;
+    const data = await b.openDriveData('cloud', json);
+    await b.listRemotes();
+    const result = await b.openDriveFootage(data.path, ['2026-10-09/' + filename]);
+    expect(result.fileCount).toBe(2);
+    const serve = spawn.mock.calls.filter(call => call[1][0] === 'serve').at(-1)[1];
+    expect(serve[serve.indexOf('--drive-root-folder-id') + 1]).toBe('day-id');
+  });
+  test('nearest sibling RecentClips wins over an unrelated broader ancestor', async () => {
+    const [b] = footageBrowser({
+      '': [entry('vehicle', 0, true), entry('TeslaCam', 0, true)],
+      vehicle: [entry('drive-data.json', 0, true), entry('RecentClips', 0, true)],
+      'vehicle/drive-data.json': [entry('drive-data.json', 123)],
+      'vehicle/RecentClips': [entry('2026-10-09', 0, true)],
+      'vehicle/RecentClips/2026-10-09': [entry(filename, 42)],
+      TeslaCam: [entry(filename, 99)]
+    });
+    await b.listRemotes();
+    const vehicle = (await b.list('cloud', '')).find(row => row.name === 'vehicle').folder;
+    const json = (await b.list('cloud', vehicle)).find(row => row.name === 'drive-data.json').folder;
+    const data = await b.openDriveData('cloud', json);
+    const result = await b.openDriveFootage(data.path, [filename]);
+    expect(result.files.map(file => file.size)).toEqual([42]);
+  });
+  test('loaded JSON keeps its footage source after a cancelled replacement and refresh', async () => {
+    const [b] = footageBrowser({
+      '': [entry('original', 0, true), entry('replacement', 0, true)],
+      original: [entry('drive-data.json', 123), entry(filename, 42)],
+      replacement: [entry('drive-data.json', 456)]
+    });
+    await b.listRemotes();
+    const roots = await b.list('cloud', '');
+    const data = await b.openDriveData('cloud', roots.find(row => row.name === 'original').folder);
+    b.loadedDriveSource = b.driveSource;
+    await b.openDriveData('cloud', roots.find(row => row.name === 'replacement').folder);
+    b.cancel();
+    expect(b.getDriveDataSource(data.path)).toBeNull();
+    await b.listRemotes();
+    const result = await b.openDriveFootage(data.path, [filename]);
+    expect(result.files.map(file => file.size)).toEqual([42]);
+  });
+  test('conflicting timestamp copies in relevant folders fail safely', async () => {
+    const [b] = footageBrowser({
+      '': [entry('drive-data.json', 123), entry('RecentClips', 0, true), entry('SavedClips', 0, true)],
+      RecentClips: [entry(filename, 42)], SavedClips: [entry(filename, 99)]
+    });
+    await b.listRemotes();
+    const data = await b.openDriveData('cloud', '');
+    await expect(b.openDriveFootage(data.path, [filename])).rejects.toMatchObject({ code: 'AMBIGUOUS_FOLDER' });
+  });
   test('trusted IPC returns actionable error codes without backend diagnostics', async () => {
     const handlers = {};
     const frame = { url: require('url').pathToFileURL(path.resolve(__dirname, '../../src/renderer/index.html')).href };

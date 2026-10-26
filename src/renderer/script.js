@@ -1371,6 +1371,13 @@ const SHOW_DRIVE_STATS_KEY = 'showDriveStats';
 let showDriveStats = localStorage.getItem(SHOW_DRIVE_STATS_KEY) !== '0';
 
 const SHOW_FSD_EVENTS_KEY = 'showFsdEvents';
+let openingRemoteDrive = false;
+let linkedRemoteDriveDataPath = null;
+
+function matchLoadedDriveFootage(drives) {
+    if (isRcloneStreamUrl(state.sentryUsb.dataPath) && linkedRemoteDriveDataPath !== state.sentryUsb.dataPath) return new Set();
+    return matchClipsTodrives(drives, library.clipGroups, folderStructure?.dates);
+}
 let showFsdEvents = localStorage.getItem(SHOW_FSD_EVENTS_KEY) !== '0';
 
 initDriveBrowser({
@@ -1379,12 +1386,35 @@ initDriveBrowser({
     driveList,
     getUseMetric: () => useMetric,
     getShowDriveStats: () => showDriveStats,
-    onDriveSelected: (drive) => {
+    onDriveSelected: async (drive) => {
+        if (openingRemoteDrive) return;
+        const dataPath = state.sentryUsb.dataPath;
+        if (isRcloneStreamUrl(dataPath)) {
+            openingRemoteDrive = true;
+            driveList?.setAttribute('aria-busy', 'true');
+            try {
+                const response = await window.electronAPI.rcloneOpenDriveFootage(dataPath, drive.routeFiles);
+                if (state.sentryUsb.dataPath !== dataPath) return;
+                if (!response?.ok) throw new Error(response?.error?.message || 'Could not locate remote footage.');
+                if (!response.data) {
+                    notify(`No remote footage found for this drive (${drive.date}).`, { type: 'info' });
+                    return;
+                }
+                await openRemoteRecordingManifest(response.data, false, dataPath);
+                await selectDriveCollection(drive);
+            } catch (error) {
+                notify(error?.message || String(error), { type: 'error' });
+            } finally {
+                openingRemoteDrive = false;
+                driveList?.removeAttribute('aria-busy');
+            }
+            return;
+        }
         if (!state.sentryUsb.hasFootage?.has(drive.id)) {
             notify(`No footage for this drive (${drive.date}) in the loaded clips folder.`, { type: 'info' });
             return;
         }
-        selectDriveCollection(drive);
+        await selectDriveCollection(drive);
     }
 });
 
@@ -1804,7 +1834,7 @@ async function loadSentryUsbData(filePath) {
             // Pass folderStructure.dates as a fallback so drives from dates other than
             // the currently-loaded date still get the Footage badge (Electron mode loads
             // clips one date at a time, so library.clipGroups is date-scoped).
-            sentryUsb.hasFootage = matchClipsTodrives(drives, library.clipGroups, folderStructure?.dates);
+            sentryUsb.hasFootage = matchLoadedDriveFootage(drives);
 
             console.log(`[SentryUSB] Loaded ${driveCount} drives from ${routeCount} routes`);
             console.log(`[SentryUSB] Footage matched: ${sentryUsb.hasFootage.size}/${driveCount} drives`);
@@ -2888,9 +2918,7 @@ function mergeIntoLibrary(built, date) {
 
     // If SentryUSB drive data is loaded, re-match drives against the new clip set.
     if (state.sentryUsb?.loaded && state.sentryUsb.drives?.length > 0) {
-        state.sentryUsb.hasFootage = matchClipsTodrives(
-            state.sentryUsb.drives, library.clipGroups, folderStructure?.dates
-        );
+        state.sentryUsb.hasFootage = matchLoadedDriveFootage(state.sentryUsb.drives);
         updateDrivesTabVisibility();
         renderDriveList();
     }
@@ -2988,7 +3016,7 @@ function updateDayFilterMarker() {
     }
 }
 
-async function handleFolderFiles(fileList, directoryName = null) {
+async function handleFolderFiles(fileList, directoryName = null, autoSelect = true) {
     if (!seiType) {
         notify(t('ui.notifications.metadataParserNotReady'), { type: 'warn' });
         return;
@@ -2996,6 +3024,7 @@ async function handleFolderFiles(fileList, directoryName = null) {
     activeTelemetryController?.abort();
     playbackBuffering.reset();
     if (![...fileList].some(file => file.isRemote)) {
+        linkedRemoteDriveDataPath = null;
         activeLibraryController?.abort();
         if (library.clipGroups.some(group => [...group.filesByCamera.values()].some(entry => entry.file?.isRemote))) {
             await window.electronAPI?.rcloneCancel?.(true);
@@ -3099,7 +3128,7 @@ async function handleFolderFiles(fileList, directoryName = null) {
 
     // Re-run clip-to-drive matching with newly loaded clips
     if (state.sentryUsb.loaded && state.sentryUsb.drives.length > 0) {
-        state.sentryUsb.hasFootage = matchClipsTodrives(state.sentryUsb.drives, library.clipGroups, folderStructure?.dates);
+        state.sentryUsb.hasFootage = matchLoadedDriveFootage(state.sentryUsb.drives);
         // Refresh drive list if currently visible
         if (driveList && driveList.style.display !== 'none') {
             renderDriveList();
@@ -3108,13 +3137,13 @@ async function handleFolderFiles(fileList, directoryName = null) {
 
     // Autoselect most recent collection if available
     const dayValues = library.dayCollections ? Array.from(library.dayCollections.values()) : [];
-    if (dayValues.length) {
+    if (autoSelect && dayValues.length) {
         dayValues.sort((a, b) => (b.sortEpoch ?? 0) - (a.sortEpoch ?? 0));
         const latest = dayValues[0];
         if (latest?.key) {
             selectDayCollection(latest.key);
         }
-    } else if (library.clipGroups.length) {
+    } else if (autoSelect && library.clipGroups.length) {
         const items = buildDisplayItems();
         const first = items[0];
         if (first?.type === 'collection') selectSentryCollection(first.id);
@@ -4999,16 +5028,16 @@ initCameraRearrange({
 });
 
 // The manifest is the library; no filesystem scan or full-folder download.
-initRcloneBrowser(async ({ directory, source, files }) => {
+async function openRemoteRecordingManifest({ directory, source, files, selectedFile }, autoSelect = true, driveDataPath = null) {
     if (!seiType) throw new Error(t('ui.notifications.metadataParserNotReady'));
     if (!Array.isArray(files) || !isRcloneStreamUrl(`${directory}/thumb.png`)) throw new Error('Invalid remote recording manifest');
     const folder = String(source?.folder || 'RecentClips').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
     const entries = files.map(file => {
-        if (!isRcloneStreamUrl(file.path) || !file.path.startsWith(`${directory}/`) || file.name.includes('/') || file.name.includes('\\')) {
+        if (!isRcloneStreamUrl(file.path) || file.name.includes('/') || file.name.includes('\\')) {
             throw new Error('Invalid remote recording manifest');
         }
         return { name: file.name, path: file.path, size: file.size, isElectronFile: true,
-            isRemote: true, webkitRelativePath: `Remote/${folder}/${file.name}` };
+            isRemote: true, webkitRelativePath: `Remote/${file.relativePath || `${folder}/${file.name}`}` };
     });
     const built = await buildTeslaCamIndex(entries, 'Remote');
     if (!built.groups.length) throw new Error(t('ui.notifications.noDashcamClipsFound'));
@@ -5020,9 +5049,25 @@ initRcloneBrowser(async ({ directory, source, files }) => {
     rootDirHandle = null;
     eventMetaByKey.clear();
     baseFolderPath = directory;
+    linkedRemoteDriveDataPath = driveDataPath;
     try {
-        await handleFolderFiles(entries, 'Remote');
+        await handleFolderFiles(entries, 'Remote', autoSelect && !selectedFile);
         library.folderLabel = `${source.remote}:${source.folder}`;
         clipBrowserSubtitle.textContent = library.folderLabel;
+        if (selectedFile) {
+            const group = library.clipGroups.find(group =>
+                [...group.filesByCamera.values()].some(entry => entry.file?.name === selectedFile));
+            if (group) {
+                const key = 'remote-file';
+                const startEpochMs = parseTimestampKeyToEpochMs(group.timestampKey) ?? 0;
+                library.dayCollections.set(key, {
+                    id: key, key, day: group.timestampKey?.split('_')[0], tag: group.clipType,
+                    groups: [group], durationMs: 60_000, segmentStartsMs: [0], startEpochMs,
+                    anchorMs: 0, anchorGroupId: group.id, sortEpoch: startEpochMs
+                });
+                selectDayCollection(key);
+            }
+        }
     } finally { hideLoading(); }
-});
+}
+initRcloneBrowser(openRemoteRecordingManifest);

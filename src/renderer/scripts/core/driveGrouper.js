@@ -602,6 +602,7 @@ function buildDrive(id, routes, driveTags) {
         accelPushCount,
         tags: Array.isArray(tags) ? tags : [],
         routeTimestampKeys,
+        routeFiles: [...new Set(routes.map(route => route.File ?? route.file).filter(value => typeof value === 'string'))],
         // First/last GPS coordinate — kept in the light IPC payload so the
         // drive list can reverse-geocode Departed/Arrived labels without
         // shipping the full points array.

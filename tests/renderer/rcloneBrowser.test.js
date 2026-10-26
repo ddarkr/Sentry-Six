@@ -3,473 +3,166 @@ const vm = require('vm');
 const path = require('path');
 class Element {
   constructor(tag, document) {
-    this.tag = tag; this.ownerDocument = document; this.children = []; this.style = {}; this.listeners = {};
-    this.value = ''; this.textContent = ''; this.attributes = {}; this.dataset = {}; this.hidden = false;
-    this.classList = { add() {}, remove() {}, toggle() {} };
+    this.tag = tag; this.ownerDocument = document; this.children = []; this.listeners = {};
+    this.dataset = {}; this.attributes = {}; this.hidden = false; this.textContent = '';
   }
-  append(...items) {
-    this.children.push(...items);
-    if (this.tag === 'select' && !this.value) this.value = items[0]?.value || '';
-  }
-  appendChild(item) { this.append(item); return item; }
-  replaceChildren(...items) { this.children = []; if (this.tag === 'select') this.value = ''; this.append(...items); }
-  setAttribute(name, value) { this.attributes[name] = String(value); }
-  removeAttribute(name) { delete this.attributes[name]; }
-  addEventListener(type, callback) { this.listeners[type] = callback; }
+  append(...children) { this.children.push(...children); }
+  replaceChildren(...children) { this.children = children; }
+  setAttribute(key, value) { this.attributes[key] = String(value); }
+  addEventListener(key, handler) { this.listeners[key] = handler; }
   querySelectorAll(selector) {
     return this.children.flatMap(child => [
-      ...(child.tag === selector || (selector[0] === '#' && child.id === selector.slice(1)) ||
-        (selector === '[data-folder-name]' && child.dataset.folderName !== undefined) ? [child] : []),
+      ...(child.tag === selector || selector === `#${child.id}` ? [child] : []),
       ...child.querySelectorAll(selector)
     ]);
   }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   focus() { this.ownerDocument.activeElement = this; }
-  showModal() { this.open = true; this.previousFocus = this.ownerDocument.activeElement; this.focus(); }
-  close() {
-    this.open = false; this.previousFocus?.focus();
-    this.listeners.close?.({});
-  }
+  click() { if (!this.disabled) return this.onclick?.(); }
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
+const ok = data => ({ ok: true, data });
 function setup() {
   const document = { activeElement: null };
   document.createElement = tag => new Element(tag, document);
-  document.createElementNS = (namespace, tag) => document.createElement(tag);
   document.body = document.createElement('body');
   document.getElementById = id => document.body.querySelector(`#${id}`);
-  const button = document.createElement('button'); button.id = 'rcloneOpenButton'; button.hidden = true;
-  document.body.append(button);
-  const api = {
-    rcloneRemotes: jest.fn(async () => ({ ok: true, data: ['fixture'] })),
-    rcloneList: jest.fn(async () => ({ ok: true, data: [{ name: '2026-10-09_12-30-00-front.mp4', size: 4, playable: true }] })),
-    rcloneOpen: jest.fn(),
-    rcloneOpenDriveData: jest.fn(async () => ({ ok: true, data: { path: 'managed-drive-url', size: 100 } })),
-    rcloneCancel: jest.fn(async () => ({ ok: true, data: null }))
-  };
-  const translationsContext = vm.createContext({});
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../../src/renderer/scripts/data/translations.js'), 'utf8').replace('export const translations =', 'globalThis.translations ='), translationsContext);
-  const t = (key, params = {}) => {
-    const value = key.split('.').reduce((node, part) => node?.[part], translationsContext.translations.en) ?? key;
-    return typeof value === 'string' ? value.replace(/\{(\w+)\}/g, (match, name) => params[name] ?? match) : key;
-  };
-  const openSettingsModal = jest.fn();
-  const registerRcloneBrowserOpener = jest.fn();
-  const loadDriveData = jest.fn(async () => ({ success: true }));
-  const context = vm.createContext({
-    document,
-    window: { electronAPI: api, _loadSentryUsbData: loadDriveData },
-    Set,
-    URL,
-    Map,
-    t,
-    onLanguageChange: jest.fn(),
-    openSettingsModal,
-    registerRcloneBrowserOpener,
-    CSS: { escape: s => s },
-    console
-  });
-
-  const settingsSource = fs.readFileSync(path.join(__dirname, '../../src/renderer/scripts/features/rcloneSettings.js'), 'utf8')
-    .replace(/^import\s+[\s\S]*?\s+from\s+['"][^'"]+['"];?\s*$/gm, '')
-    .replaceAll('export function ', 'function ')
-    .replaceAll('export async function ', 'async function ');
-  vm.runInContext(settingsSource, context);
-  context.unwrap = context.unwrapRcloneResponse;
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../../src/renderer/scripts/lib/utils.js'), 'utf8')
-    .replaceAll('export function ', 'function '), context);
-
-  const source = fs.readFileSync(path.join(__dirname, '../../src/renderer/scripts/features/rcloneBrowser.js'), 'utf8')
-    .replace(/^import\s+[\s\S]*?\s+from\s+['"][^'"]+['"];?\s*$/gm, '')
-    .replaceAll('export function ', 'function ');
-  vm.runInContext(source, context);
-  const onOpen = jest.fn(async () => {}); context.initRcloneBrowser(onOpen);
-  const ids = {
-    dialog: 'rcloneDialog', select: 'rcloneRemote', refresh: 'rcloneRefresh', manage: 'rcloneManage',
-    up: 'rcloneUp', location: 'rcloneLocation', status: 'rcloneStatus', authAction: 'rcloneAuthAction',
-    list: 'rcloneList', open: 'rcloneDownload', close: 'rcloneClose', details: 'rcloneErrorDetails'
-  };
-  return { context, document, api, button, loadDriveData, openSettingsModal, registerRcloneBrowserOpener, ...Object.fromEntries(Object.entries(ids).map(([name, id]) => [name, document.getElementById(id)])), onOpen };
-}
-test('browses and hands the stream manifest to playback exactly once', async () => {
-  const ui = setup();
-  const directory = `http://127.0.0.1:12345/sentry-rclone/${'a'.repeat(64)}`;
-  const manifest = { directory, source: { remote: 'fixture', folder: 'RecentClips' },
-    files: [{ name: '2026-10-09_12-30-00-front.mp4', path: `${directory}/2026-10-09_12-30-00-front.mp4`, size: 4 }] };
-  ui.api.rcloneOpen.mockResolvedValue({ ok: true, data: manifest });
-  ui.button.onclick(); await flush(); expect(ui.open.disabled).toBe(false);
-  ui.open.onclick(); ui.open.onclick(); await flush();
-  expect(ui.api.rcloneOpen).toHaveBeenCalledTimes(1); expect(ui.onOpen).toHaveBeenCalledTimes(1); expect(ui.dialog.open).toBe(false);
-  expect(ui.onOpen).toHaveBeenCalledWith(manifest);
-  expect(ui.context.isReadOnlyRclonePath(directory)).toBe(true);
-  expect(ui.context.isReadOnlyRclonePath(manifest.files[0].path)).toBe(true);
-  expect(ui.context.filePathToUrl(manifest.files[0].path)).toBe(manifest.files[0].path);
-  expect(ui.context.isReadOnlyRclonePath(null)).toBe(false);
-  expect(ui.context.isReadOnlyRclonePath('/tmp/local')).toBe(false);
-});
-test('accepts only exact managed loopback URLs and preserves local escaping', () => {
-  const { context } = setup();
-  const root = `http://127.0.0.1:12345/sentry-rclone/${'a'.repeat(64)}`;
-  for (const path of [`${root}/clip.mp4?x=1`, `${root}/%2Fsecret`, `${root}/..`, `${root}/.`, `${root}/%2e%2e`, `${root}/bad%zz`,
-    `${root}/clip.mp4#fragment`, `${root}/%5Csecret`, `${root}/%00secret`,
-    root.replace('127.0.0.1', 'localhost') + '/clip.mp4', root.replace(':12345', ':99999') + '/clip.mp4']) {
-    expect(context.isRcloneStreamUrl(path)).toBe(false);
+  for (const [tag, id] of [['button', 'rcloneOpenButton'], ['section', 'rcloneTreePanel'], ['button', 'drivesTabBtn']]) {
+    const element = document.createElement(tag); element.id = id; element.hidden = id !== 'drivesTabBtn'; document.body.append(element);
   }
-  expect(context.filePathToUrl('/tmp/a #?.mp4')).toBe('file:///tmp/a%20%23%3F.mp4');
-});
-test('failed playback handoff cancels its stream and leaves retry available', async () => {
+  const api = {
+    rcloneRemotes: jest.fn(async () => ok(['fixture'])),
+    rcloneList: jest.fn(async () => ok([{ name: 'clip.mp4', playable: true }])),
+    rcloneOpen: jest.fn(async () => ok({ directory: 'managed-stream' })),
+    rcloneOpenDriveData: jest.fn(async () => ok({ path: 'managed-drive-url' })),
+    rcloneCancel: jest.fn(async () => ok(null))
+  };
+  const onOpen = jest.fn(async () => {});
+  const loadDriveData = jest.fn(async () => ({ success: true }));
+  const openSettingsModal = jest.fn(), registerRcloneBrowserOpener = jest.fn();
+  const drives = document.getElementById('drivesTabBtn'); drives.onclick = jest.fn();
+  const context = vm.createContext({
+    document, window: { electronAPI: api, _loadSentryUsbData: loadDriveData },
+    t: key => key, onLanguageChange: jest.fn(), openSettingsModal, registerRcloneBrowserOpener,
+    isRcloneStreamUrl: value => typeof value === 'string' && value.startsWith('http://127.0.0.1:'),
+    unwrap: async promise => { const result = await promise; if (!result.ok) throw result.error; return result.data; },
+    getRcloneErrorMessage: error => error.message || error.code
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../../src/renderer/scripts/features/rcloneBrowser.js'), 'utf8')
+    .replace(/^import .*;$/gm, '').replaceAll('export function ', 'function '), context);
+  context.initRcloneBrowser(onOpen);
+  const get = id => document.getElementById(id);
+  return { api, onOpen, loadDriveData, openSettingsModal, registerRcloneBrowserOpener, drives,
+    button: get('rcloneOpenButton'), panel: get('rcloneTreePanel'), list: get('rcloneList'),
+    close: get('rcloneClose'), refresh: get('rcloneRefresh'), manage: get('rcloneManage'),
+    reconnect: get('rcloneAuthAction'), status: get('rcloneStatus') };
+}
+async function openRoot(ui) {
+  ui.button.click(); await flush();
+  const root = ui.list.children[0]; root.children[0].children[0].click(); await flush();
+  return root;
+}
+test('configured roots load lazily and preserve ancestors and cached branches', async () => {
   const ui = setup();
-  ui.api.rcloneOpen.mockResolvedValue({ ok: true, data: { directory: 'unused' } });
-  ui.onOpen.mockRejectedValueOnce(new Error('Unable to open recording'));
-  ui.button.onclick(); await flush(); ui.open.onclick(); await flush();
-  expect(ui.api.rcloneCancel).toHaveBeenCalledTimes(1);
-  expect(ui.api.rcloneCancel).toHaveBeenCalledWith(true);
-  expect(ui.dialog.open).toBe(true);
-  expect(ui.open.disabled).toBe(false);
+  ui.api.rcloneList.mockResolvedValueOnce(ok([{ name: 'TeslaCam', folder: 'opaque-folder', isDirectory: true }]));
+  ui.button.click(); await flush(); expect(ui.api.rcloneList).not.toHaveBeenCalled();
+  const root = ui.list.children[0], rootToggle = root.children[0].children[0];
+  rootToggle.click(); await flush();
+  const folder = root.children[1].children[0]; folder.children[0].children[0].click(); await flush();
+  expect(ui.api.rcloneList).toHaveBeenLastCalledWith('fixture', 'opaque-folder');
+  expect(ui.list.children[0]).toBe(root); expect(root.children[1].children[0]).toBe(folder);
+  rootToggle.click(); await flush(); expect(root.children[1].hidden).toBe(true);
+  rootToggle.click(); await flush(); expect(root.children[1].hidden).toBe(false);
+  expect(ui.api.rcloneList).toHaveBeenCalledTimes(2);
 });
-test('dismissing an idle picker does not revoke the playing library stream', async () => {
+test('file activation passes selected filename and folder play passes the whole manifest once', async () => {
+  const ui = setup(); const root = await openRoot(ui);
+  root.children[1].children[0].children[0].click(); await flush();
+  expect(ui.onOpen).toHaveBeenCalledWith({ directory: 'managed-stream', selectedFile: 'clip.mp4' });
+  expect(ui.panel.hidden).toBe(false);
+  const play = root.children[0].children[1]; play.click(); play.click(); await flush();
+  expect(ui.api.rcloneOpen).toHaveBeenCalledTimes(2);
+  expect(ui.onOpen).toHaveBeenLastCalledWith({ directory: 'managed-stream' });
+});
+test('duplicate names retain distinct opaque references and literal names', async () => {
   const ui = setup();
-  ui.button.onclick(); await flush(); ui.close.onclick(); await flush();
-  expect(ui.dialog.open).toBe(false);
+  ui.api.rcloneList.mockResolvedValueOnce(ok([
+    { name: '<TeslaCam>', id: 'id-111111', folder: 'ref-one', isDirectory: true },
+    { name: '<TeslaCam>', id: 'id-222222', folder: 'ref-two', isDirectory: true }
+  ]));
+  const root = await openRoot(ui); const children = root.children[1].children;
+  const first = children[0].children[0].children[0], second = children[1].children[0].children[0];
+  expect(first.textContent).toContain('<TeslaCam>'); expect(first.textContent).not.toBe(second.textContent);
+  first.click(); await flush(); second.click(); await flush();
+  expect(ui.api.rcloneList).toHaveBeenCalledWith('fixture', 'ref-one');
+  expect(ui.api.rcloneList).toHaveBeenCalledWith('fixture', 'ref-two');
+});
+test('drive-data.json directories expand; JSON files load and activate Drives', async () => {
+  const ui = setup();
+  ui.api.rcloneList.mockResolvedValueOnce(ok([{ name: 'drive-data.json', folder: 'json-directory', isDirectory: true }]));
+  ui.api.rcloneList.mockResolvedValueOnce(ok([{ name: 'drive-data.json', isDirectory: false }]));
+  const root = await openRoot(ui); const directory = root.children[1].children[0];
+  directory.children[0].children[0].click(); await flush();
+  expect(ui.api.rcloneOpenDriveData).not.toHaveBeenCalled();
+  directory.children[1].children[0].children[0].click(); await flush();
+  expect(ui.api.rcloneOpenDriveData).toHaveBeenCalledWith('fixture', 'json-directory');
+  expect(ui.loadDriveData).toHaveBeenCalledWith('managed-drive-url'); expect(ui.drives.onclick).toHaveBeenCalledTimes(1);
+});
+test('idle cloud toggle preserves playback and reuses the same tree', async () => {
+  const ui = setup(); const root = await openRoot(ui);
+  ui.button.click(); await flush(); expect(ui.panel.hidden).toBe(true);
   expect(ui.api.rcloneCancel).not.toHaveBeenCalled();
+  ui.button.click(); await flush(); expect(ui.list.children[0]).toBe(root);
 });
-test('cancel prevents a late download from replacing current library', async () => {
-  const ui = setup(); let resolve; ui.api.rcloneOpen.mockReturnValue(new Promise(r => { resolve = r; }));
-  ui.button.onclick(); await flush(); ui.open.onclick(); ui.close.onclick();
-  resolve({ ok: true, data: { directory: '/tmp/cache/snapshot' } }); await flush();
-  expect(ui.onOpen).not.toHaveBeenCalled(); expect(ui.dialog.open).toBe(false); expect(ui.api.rcloneCancel).toHaveBeenCalledTimes(1);
-  expect(ui.api.rcloneCancel).toHaveBeenCalledWith();
-  expect(ui.button.disabled).toBe(false);
-});
-test('picker cancellation preserves playback but failed source integration releases it', async () => {
-  const ui = setup();
-  let playingStream = 'current';
-  ui.api.rcloneCancel.mockImplementation(async (release = false) => {
-    if (release) playingStream = null;
-    return { ok: true, data: null };
-  });
-  ui.button.onclick(); await flush(); ui.close.onclick(); await flush();
-  expect(playingStream).toBe('current');
-
-  let resolveOpen;
-  ui.api.rcloneOpen.mockReturnValueOnce(new Promise(resolve => { resolveOpen = resolve; }));
-  ui.button.onclick(); await flush(); ui.open.onclick(); ui.close.onclick();
-  resolveOpen({ ok: false, error: { code: 'CANCELLED', message: 'Cancelled' } });
-  await flush();
-  expect(ui.api.rcloneCancel).toHaveBeenLastCalledWith();
-  expect(playingStream).toBe('current');
-  expect(ui.onOpen).not.toHaveBeenCalled();
-
-  ui.api.rcloneOpen.mockImplementationOnce(async () => {
-    playingStream = 'replacement';
-    return { ok: true, data: { directory: 'unused' } };
-  });
-  ui.onOpen.mockRejectedValueOnce(new Error('Unable to open recording'));
-  ui.button.onclick(); await flush(); ui.open.onclick(); await flush();
-  expect(ui.api.rcloneCancel).toHaveBeenLastCalledWith(true);
-  expect(playingStream).toBeNull();
-});
-test('late directory listing after Escape stays dismissed and retry works', async () => {
-  const ui = setup(); let resolve; ui.api.rcloneList.mockReturnValueOnce(new Promise(r => { resolve = r; }));
-  ui.button.onclick(); await flush(); ui.dialog.listeners.cancel({ preventDefault() {} });
-  resolve({ ok: true, data: [{ name: '<img src=x onerror=bad>', folder: 'ref-escape', isDirectory: true }] }); await flush();
-  expect(ui.list.children).toHaveLength(0); expect(ui.dialog.open).toBe(false);
-  ui.button.onclick(); await flush(); expect(ui.dialog.open).toBe(true); expect(ui.open.disabled).toBe(false);
-});
-
-test.each(['rcloneRemotes', 'rcloneList'])('cancelling %s blocks reopen until cancellation finishes', async method => {
-  const ui = setup();
-  let finishListing, finishCancel;
-  ui.api[method].mockReturnValueOnce(new Promise(resolve => { finishListing = resolve; }));
+test('cancel ignores late activation and blocks reopen until cancellation settles', async () => {
+  const ui = setup(); const root = await openRoot(ui); let finishOpen, finishCancel;
+  ui.api.rcloneOpen.mockReturnValueOnce(new Promise(resolve => { finishOpen = resolve; }));
   ui.api.rcloneCancel.mockReturnValueOnce(new Promise(resolve => { finishCancel = resolve; }));
-  ui.button.onclick(); await flush();
-  const cancelled = ui.close.onclick();
-  expect(ui.dialog.open).toBe(false);
-  expect(ui.button.disabled).toBe(true);
+  root.children[0].children[1].click(); const cancellation = ui.close.click();
+  expect(ui.panel.hidden).toBe(true); expect(ui.button.disabled).toBe(true);
+  finishOpen(ok({ directory: 'late' })); await flush(); expect(ui.onOpen).not.toHaveBeenCalled();
+  ui.button.click(); expect(ui.panel.hidden).toBe(true);
+  finishCancel(ok(null)); await cancellation; expect(ui.button.disabled).toBe(false);
   expect(ui.api.rcloneCancel).toHaveBeenCalledWith();
-  ui.button.onclick();
-  expect(ui.dialog.open).toBe(false);
-  await ui.close.onclick(); // A second dismissal must not unlock the pending cancellation.
-  expect(ui.button.disabled).toBe(true);
-  finishListing({ ok: false, error: { code: 'CANCELLED', message: 'Cancelled' } });
-  await flush();
-  expect(ui.button.disabled).toBe(true);
-  finishCancel({ ok: true, data: null });
-  await cancelled;
-  expect(ui.button.disabled).toBe(false);
-  expect(ui.document.activeElement).toBe(ui.button);
-  ui.button.onclick(); await flush();
-  expect(ui.dialog.open).toBe(true);
-  expect(ui.open.disabled).toBe(false);
-  expect(ui.details.hidden).toBe(true);
 });
-test('failure is shown and leaves retry available; dialog isolates global shortcuts', async () => {
-  const ui = setup(); ui.api.rcloneRemotes.mockResolvedValueOnce({ ok: false, error: { code: 'NOT_INSTALLED', message: 'rclone not found' } });
-  ui.button.onclick(); await flush(); expect(ui.status.textContent).not.toBe(''); expect(ui.refresh.disabled).toBe(false); expect(ui.open.disabled).toBe(true);
-  const event = { stopPropagation: jest.fn() }; ui.dialog.listeners.keydown(event); ui.dialog.listeners.mousedown(event); expect(event.stopPropagation).toHaveBeenCalledTimes(2);
+test('cancel ignores late lazy listing and the branch can retry', async () => {
+  const ui = setup(); let finish;
+  ui.api.rcloneList.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  ui.button.click(); await flush(); const root = ui.list.children[0];
+  root.children[0].children[0].click(); await ui.close.click();
+  finish(ok([{ name: 'late', folder: 'late', isDirectory: true }])); await flush();
+  expect(root.children[1].children).toHaveLength(0);
+  ui.button.click(); root.children[0].children[0].click(); await flush();
+  expect(root.children[1].children).toHaveLength(1);
 });
-test('remote and folder names remain literal text and retain their navigation value', async () => {
+test('failed playback handoff releases failed stream but keeps retry available', async () => {
+  const ui = setup(); const root = await openRoot(ui);
+  ui.onOpen.mockRejectedValueOnce(new Error('Cannot integrate'));
+  root.children[0].children[1].click(); await flush();
+  expect(ui.api.rcloneCancel).toHaveBeenCalledWith(true);
+  expect(ui.status.dataset.state).toBe('error'); expect(ui.refresh.disabled).toBe(false);
+});
+test('auth errors expose reconnect and settings return refreshes configured roots', async () => {
   const ui = setup();
-  const remote = '<img src=x onerror=bad>';
-  const folder = '<script>bad()</script>';
-  const folderRef = 'ref-opaque-folder';
-  ui.api.rcloneRemotes.mockResolvedValue({ ok: true, data: [remote] });
-  ui.api.rcloneList.mockResolvedValueOnce({ ok: true, data: [{ name: folder, folder: folderRef, isDirectory: true }] });
-  ui.button.onclick(); await flush();
-  expect(ui.select.children[0].textContent).toBe(remote);
-  expect(ui.select.children[0].value).toBe(remote);
-  const folderButton = ui.list.querySelectorAll('button')[0];
-  const text = element => element.textContent + element.children.map(text).join('');
-  expect(text(folderButton)).toContain(folder);
-  folderButton.onclick(); await flush();
-  expect(ui.api.rcloneList).toHaveBeenLastCalledWith(remote, folderRef);
-});
-test('connection management button closes native dialog before opening settings', async () => {
-  const ui = setup();
-  ui.button.onclick(); await flush();
-  expect(ui.dialog.open).toBe(true);
-  expect(ui.manage).not.toBeNull();
-  ui.manage.onclick(); await flush();
-  expect(ui.dialog.open).toBe(false);
-  expect(ui.openSettingsModal).toHaveBeenCalledWith('storage', 'fixture', expect.objectContaining({ reconnect: false }));
-});
-test('auth required failure shows reconnect button which closes dialog and opens settings to reconnect', async () => {
-  const ui = setup();
-  ui.api.rcloneList.mockResolvedValueOnce({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Token expired' } });
-  ui.button.onclick(); await flush();
-  expect(ui.authAction.hidden).toBe(false);
-  ui.authAction.onclick(); await flush();
-  expect(ui.dialog.open).toBe(false);
+  ui.api.rcloneList.mockResolvedValueOnce({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Expired' } });
+  await openRoot(ui); expect(ui.reconnect.hidden).toBe(false);
+  ui.reconnect.click(); expect(ui.panel.hidden).toBe(true);
   expect(ui.openSettingsModal).toHaveBeenCalledWith('storage', 'fixture', expect.objectContaining({ reconnect: true }));
+  ui.api.rcloneRemotes.mockResolvedValueOnce(ok(['new-remote']));
+  ui.openSettingsModal.mock.calls[0][2].onReturn('new-remote'); await flush();
+  expect(ui.api.rcloneList).toHaveBeenLastCalledWith('new-remote', ''); expect(ui.panel.hidden).toBe(false);
 });
-test('returning from settings selects freshly configured remote and retains navigation', async () => {
-  const ui = setup();
-  ui.button.onclick(); await flush();
-  ui.manage.onclick(); await flush();
-  const options = ui.openSettingsModal.mock.calls[0][2];
-  expect(options?.onReturn).toBeDefined();
-
-  ui.api.rcloneRemotes.mockResolvedValueOnce({ ok: true, data: ['fixture', 'gdrive-fresh'] });
-  ui.api.rcloneList.mockResolvedValueOnce({ ok: true, data: [{ name: 'clip.mp4', size: 10, playable: true }] });
-
-  options.onReturn('gdrive-fresh');
-  await flush();
-  expect(ui.dialog.open).toBe(true);
-  expect(ui.select.value).toBe('gdrive-fresh');
-  expect(ui.api.rcloneList).toHaveBeenCalledWith('gdrive-fresh', '');
+test('empty remotes and errors retain connection management and refresh', async () => {
+  const ui = setup(); ui.api.rcloneRemotes.mockResolvedValueOnce(ok([]));
+  ui.button.click(); await flush(); expect(ui.list.children).toHaveLength(0); expect(ui.manage.disabled).toBe(false);
+  ui.api.rcloneRemotes.mockRejectedValueOnce(new Error('Unavailable'));
+  ui.refresh.click(); await flush(); expect(ui.status.dataset.state).toBe('error'); expect(ui.refresh.disabled).toBe(false);
+  ui.refresh.click(); await flush(); expect(ui.list.children).toHaveLength(1);
 });
-
-test('navigates folder hierarchy using opaque references and pops on parent', async () => {
-  const ui = setup();
-  ui.api.rcloneRemotes.mockResolvedValue({ ok: true, data: ['drive'] });
-  ui.api.rcloneList.mockResolvedValueOnce({
-    ok: true,
-    data: [{ name: 'TeslaCam', folder: 'ref-fld-123', isDirectory: true }]
-  });
-  ui.button.onclick(); await flush();
-
-  expect(ui.up.disabled).toBe(true);
-  expect(ui.location.textContent).toBe('drive:/');
-
-  const folderBtn = ui.list.querySelectorAll('button')[0];
-  ui.api.rcloneList.mockResolvedValueOnce({
-    ok: true,
-    data: [{ name: '2026-10-10_front.mp4', size: 1024 * 1024 * 2, playable: true }]
-  });
-
-  folderBtn.onclick(); await flush();
-
-  expect(ui.api.rcloneList).toHaveBeenLastCalledWith('drive', 'ref-fld-123');
-  expect(ui.up.disabled).toBe(false);
-  expect(ui.location.textContent).toBe('drive:/TeslaCam');
-
-  ui.api.rcloneList.mockResolvedValueOnce({
-    ok: true,
-    data: [{ name: 'TeslaCam', folder: 'ref-fld-123', isDirectory: true }]
-  });
-  ui.up.onclick(); await flush();
-
-  expect(ui.api.rcloneList).toHaveBeenLastCalledWith('drive', '');
-  expect(ui.up.disabled).toBe(true);
-  expect(ui.location.textContent).toBe('drive:/');
-});
-
-test('distinguishes same-name directory rows using entry.id suffix in label and navigates with opaque ref', async () => {
-  const ui = setup();
-  ui.api.rcloneRemotes.mockResolvedValue({ ok: true, data: ['fixture'] });
-  ui.api.rcloneList.mockResolvedValueOnce({
-    ok: true,
-    data: [
-      { name: 'TeslaCam', folder: 'ref-fld-1', id: '111111222222', isDirectory: true },
-      { name: 'TeslaCam', folder: 'ref-fld-2', id: '333333444444', isDirectory: true }
-    ]
-  });
-  ui.button.onclick(); await flush();
-
-  const buttons = ui.list.querySelectorAll('button');
-  expect(buttons.length).toBe(2);
-
-  const text = el => el.textContent + el.children.map(text).join('');
-  expect(text(buttons[0])).toContain('222222');
-  expect(text(buttons[1])).toContain('444444');
-  expect(buttons[0].attributes['aria-label']).toContain('222222');
-  expect(buttons[1].attributes['aria-label']).toContain('444444');
-
-  ui.api.rcloneList.mockResolvedValueOnce({
-    ok: true,
-    data: [{ name: 'clip.mp4', size: 1000, playable: true }]
-  });
-  buttons[1].onclick(); await flush();
-
-  expect(ui.api.rcloneList).toHaveBeenLastCalledWith('fixture', 'ref-fld-2');
-  expect(ui.location.textContent).toBe('fixture:/TeslaCam');
-  expect(ui.location.textContent).not.toContain('ref-fld-2');
-});
-
-test('rate limit error shows directly in picker status without reconnect CTA or details', async () => {
-  const ui = setup();
-  ui.api.rcloneRemotes.mockResolvedValue({ ok: true, data: ['fixture'] });
-  ui.api.rcloneList.mockResolvedValueOnce({
-    ok: false,
-    error: { code: 'RATE_LIMIT', message: 'Rate limit exceeded' }
-  });
-
-  ui.button.onclick(); await flush();
-
-  expect(ui.status.dataset.state).toBe('error');
-  expect(ui.status.textContent).not.toBe('');
-  expect(ui.authAction.hidden).toBe(true);
-  expect(ui.details.hidden).toBe(true);
-});
-
-test('remote change resets root navigation', async () => {
-  const ui = setup();
-  ui.api.rcloneRemotes.mockResolvedValue({ ok: true, data: ['drive-a', 'drive-b'] });
-  ui.api.rcloneList.mockResolvedValueOnce({
-    ok: true,
-    data: [{ name: 'Sub', folder: 'ref-sub', isDirectory: true }]
-  });
-  ui.button.onclick(); await flush();
-
-  ui.api.rcloneList.mockResolvedValueOnce({
-    ok: true,
-    data: [{ name: 'clip.mp4', size: 1000, playable: true }]
-  });
-  const subBtn = ui.list.querySelectorAll('button')[0];
-  subBtn.onclick(); await flush();
-  expect(ui.up.disabled).toBe(false);
-
-  ui.select.value = 'drive-b';
-  ui.api.rcloneList.mockResolvedValueOnce({
-    ok: true,
-    data: []
-  });
-  ui.select.onchange();
-  await flush();
-
-  expect(ui.api.rcloneList).toHaveBeenLastCalledWith('drive-b', '');
-  expect(ui.up.disabled).toBe(true);
-});
-
-test('drive picker lists only drive-data.json and loads it without replacing playback', async () => {
-  const ui = setup();
-  ui.api.rcloneList.mockResolvedValue({ ok: true, data: [
-    { name: 'clip.mp4', playable: true }, { name: 'other.json' },
-    { name: 'DRIVE-DATA.JSON', size: 100 }, { name: 'Trips', isDirectory: true, folder: 'trips-ref' }
-  ] });
-  ui.context.openRcloneDriveDataBrowser(); await flush();
-  expect(ui.list.children).toHaveLength(2);
-  expect(ui.open.disabled).toBe(false);
-  ui.open.onclick(); await flush();
-  expect(ui.api.rcloneOpenDriveData).toHaveBeenCalledWith('fixture', '');
-  expect(ui.loadDriveData).toHaveBeenCalledWith('managed-drive-url');
-  expect(ui.api.rcloneOpen).not.toHaveBeenCalled();
-  expect(ui.onOpen).not.toHaveBeenCalled();
-  expect(ui.dialog.open).toBe(false);
-});
-
-test('drive picker requires drive-data.json, including when recordings exist', async () => {
-  const ui = setup();
-  ui.context.openRcloneDriveDataBrowser(); await flush();
-  expect(ui.list.children).toHaveLength(0);
-  expect(ui.open.disabled).toBe(true);
-});
-
-test('failed drive parse reports error and allows retry without revoking video', async () => {
-  const ui = setup();
-  ui.api.rcloneList.mockResolvedValue({ ok: true, data: [{ name: 'drive-data.json', size: 100 }] });
-  ui.loadDriveData.mockResolvedValueOnce({ success: false, error: 'Invalid JSON' });
-  ui.context.openRcloneDriveDataBrowser(); await flush(); ui.open.onclick(); await flush();
-  expect(ui.dialog.open).toBe(true);
-  expect(ui.details.hidden).toBe(false);
-  expect(ui.open.disabled).toBe(false);
-  expect(ui.api.rcloneCancel).toHaveBeenCalledWith();
-  expect(ui.api.rcloneCancel).not.toHaveBeenCalledWith(true);
-  ui.open.onclick(); await flush();
-  expect(ui.dialog.open).toBe(false);
-  expect(ui.loadDriveData).toHaveBeenCalledTimes(2);
-});
-
-test('cancelling drive parse closes its stream and stale completion leaves retry untouched', async () => {
-  const ui = setup(); let finish;
-  ui.api.rcloneList.mockResolvedValue({ ok: true, data: [{ name: 'drive-data.json', size: 100 }] });
-  ui.loadDriveData.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
-  ui.context.openRcloneDriveDataBrowser(); await flush(); ui.open.onclick(); await flush();
-  expect(ui.close.disabled).toBe(false);
-  ui.close.onclick(); await flush();
-  expect(ui.dialog.open).toBe(false);
-  expect(ui.api.rcloneCancel).toHaveBeenCalledWith();
-  ui.context.openRcloneDriveDataBrowser(); await flush();
-  finish({ success: false, error: 'Cancelled' }); await flush();
-  expect(ui.dialog.open).toBe(true);
-  expect(ui.details.hidden).toBe(true);
-  expect(ui.open.disabled).toBe(false);
-  expect(ui.api.rcloneCancel).toHaveBeenCalledTimes(1);
-  ui.open.onclick(); await flush();
-  expect(ui.dialog.open).toBe(false);
-  expect(ui.onOpen).not.toHaveBeenCalled();
-});
-
-test('drive mode survives connection settings and resets for recordings entry', async () => {
-  const ui = setup();
-  ui.api.rcloneList.mockResolvedValue({ ok: true, data: [{ name: 'drive-data.json', size: 100 }] });
-  ui.registerRcloneBrowserOpener.mock.calls[0][0](null, true); await flush();
-  ui.manage.onclick(); await flush();
-  ui.openSettingsModal.mock.calls[0][2].onReturn('fixture'); await flush();
-  expect(ui.open.disabled).toBe(false);
-  ui.open.onclick(); await flush();
-  expect(ui.loadDriveData).toHaveBeenCalledTimes(1);
-  ui.button.onclick(); await flush();
-  expect(ui.open.disabled).toBe(true);
-});
-
-test('cancelling drive source open never starts its late parse or releases video', async () => {
-  const ui = setup(); let finish;
-  ui.api.rcloneList.mockResolvedValue({ ok: true, data: [{ name: 'drive-data.json', size: 100 }] });
-  ui.api.rcloneOpenDriveData.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
-  ui.context.openRcloneDriveDataBrowser(); await flush(); ui.open.onclick();
-  ui.dialog.listeners.cancel({ preventDefault() {} });
-  finish({ ok: true, data: { path: 'expired-drive-url' } }); await flush();
-  expect(ui.loadDriveData).not.toHaveBeenCalled();
-  expect(ui.api.rcloneCancel).toHaveBeenCalledWith();
-  expect(ui.dialog.open).toBe(false);
-  ui.context.openRcloneDriveDataBrowser(); await flush(); ui.open.onclick(); await flush();
-  expect(ui.loadDriveData).toHaveBeenCalledWith('managed-drive-url');
-  expect(ui.onOpen).not.toHaveBeenCalled();
-});
-
-test('a directory named drive-data.json remains navigable and cannot be loaded as a file', async () => {
-  const ui = setup();
-  ui.api.rcloneList.mockResolvedValueOnce({ ok: true, data: [
-    { name: 'drive-data.json', isDirectory: true, folder: 'drive-directory-ref' }
-  ] }).mockResolvedValueOnce({ ok: true, data: [{ name: 'drive-data.json', size: 100 }] });
-  ui.context.openRcloneDriveDataBrowser(); await flush();
-  expect(ui.open.disabled).toBe(true);
-  const folder = ui.list.querySelectorAll('button')[0];
-  expect(folder).toBeDefined();
-  folder.onclick(); await flush();
-  expect(ui.api.rcloneList).toHaveBeenLastCalledWith('fixture', 'drive-directory-ref');
-  expect(ui.open.disabled).toBe(false);
-  ui.open.onclick(); await flush();
-  expect(ui.api.rcloneOpenDriveData).toHaveBeenCalledWith('fixture', 'drive-directory-ref');
+test('settings and drive-data entrypoints reveal the same tree and isolate shortcuts', async () => {
+  const ui = setup(); ui.registerRcloneBrowserOpener.mock.calls[0][0]('fixture', true); await flush();
+  expect(ui.panel.hidden).toBe(false); expect(ui.api.rcloneList).toHaveBeenCalledWith('fixture', '');
+  const event = { key: 'Escape', preventDefault: jest.fn(), stopPropagation: jest.fn() };
+  ui.panel.listeners.keydown(event); await flush();
+  expect(ui.panel.hidden).toBe(true); expect(event.stopPropagation).toHaveBeenCalled();
 });

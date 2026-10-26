@@ -7,11 +7,13 @@ If a GUI launch cannot find rclone on PATH, select its executable there.
 Install rclone separately using https://rclone.org/install/; the app does not
 install software automatically.
 
-1. Select a configured remote, then navigate through folders.
-2. Choose an event folder containing TeslaCam-named MP4 recordings, or a
-   RecentClips folder. Review the listed filenames and sizes.
-3. **Stream this folder** builds a manifest of supported clips and event metadata
-   in that folder, without recursion or a complete-folder download.
+1. Open **Remote folders** to show the expandable tree above the sidebar's
+   Clips/Drives tabs. Expand a remote and its folders; only expanded folders are
+   listed, and their ancestors remain visible.
+2. Click a TeslaCam-named MP4 to play that timestamp with its available cameras,
+   or use **Play** beside a recording folder to open its full timeline.
+3. The manifest includes supported clips and event metadata in that folder,
+   without recursion or a complete-folder download.
 4. Playback and seeking read remote byte ranges as needed. There is no 2 GiB
    playback-folder gate and no persistent offline recording cache. Original video
    basenames remain available for capture-time parsing.
@@ -50,17 +52,16 @@ or failure. The combined selected originals must fit within 2 GiB, with at least
 128 MiB free disk headroom beyond their size. Even a short export can need a
 complete original segment; the limit is not the encoded output size.
 
-The centered picker follows the app language and keeps long paths and file lists
-inside the window. Errors show a short message with expandable details; refresh
-retries the remote list. Escape or **Close** dismisses the picker and returns focus.
-Cancellation also stops an in-flight remote or folder listing. Reopening stays
-disabled until that rclone operation finishes releasing its lock; an existing
-recording playback stream remains available.
+The tree follows the app language and scrolls independently of the clip/drive
+list. Errors appear inline; **Refresh** reloads the remote roots. Escape or
+**Close** hides the tree. Cancellation stops an in-flight listing without
+revoking an existing recording stream, and reopening waits for cancellation to
+finish. Closing an idle tree preserves expanded folders.
 
 Google Drive folders are selected by their IDs, not by their names. Same-name
-folders remain separate rows with ID suffixes, and Parent follows the selected
-navigation history. Refreshing remotes or returning from settings starts at the
-root so references from a previous connection are not reused.
+folders remain separate rows with ID suffixes. Refreshing remotes or returning
+from settings resets the visible tree; the loaded drive JSON's source and
+ancestor references remain available for footage lookup.
 
 SentryClips/YYYY-MM-DD_HH-MM-SS and SavedClips/YYYY-MM-DD_HH-MM-SS wrappers,
 event.json, event.png and thumb.png are retained. Other folders load as loose
@@ -68,11 +69,11 @@ clips; event categories and event metadata are not inferred for arbitrary paths.
 
 ## Remote SentryUSB drive data
 
-In **Drives**, choose **Open remote drive-data.json**, then browse to the folder
-containing that file and select **Load drive data**. The same action under
-**Settings → Storage** lets you replace loaded data; the local file picker remains
-available. A folder named `drive-data.json` is navigable like any other folder:
-open it to select the file inside.
+Click `drive-data.json` directly in the sidebar tree to load it and switch to
+**Drives**. **Open remote drive-data.json** in Drives or **Settings → Storage**
+opens the same tree; the local file picker remains available. A folder named
+`drive-data.json` is expandable like any other folder: open it to select the file
+inside.
 
 The file streams through a separate read-only rclone session into the existing
 worker parser, without a downloaded temporary JSON file or whole-response string.
@@ -81,6 +82,22 @@ not on-demand loading of individual drives. Loading or cancelling drive data
 does not replace the current video source. Malformed or interrupted loads do not
 replace previously loaded drives. Remote selections last for this app session
 only; capability URLs are not saved in preferences.
+
+Selecting a remote drive resolves its original route filenames against the
+JSON's remote folder and ancestors, relative route directories, sibling or nested
+`TeslaCam/{RecentClips,SavedClips,SentryClips}`, and relevant date/event folders.
+The closest scope containing every requested timestamp wins. Available matching
+timestamps can still play when some originals are absent. A drive can span
+multiple folders; its selected camera files share a playback/export manifest.
+An unrelated already-open video library is never used as a fallback, and the
+Footage badge appears only after footage has been resolved for that JSON.
+
+Lookup is bounded to 10,000 route references, 16 path/ancestor levels and 128
+directory listings; it does not recursively scan the entire remote. Absolute
+old-device paths, traversal and ambiguous folder names fail explicitly. For
+archives outside these layouts or bounds, open their video folder directly in
+the tree. Loaded JSON source information survives browsing cancellation and a
+failed replacement load; changing connection configuration invalidates it.
 
 ## Connection settings
 

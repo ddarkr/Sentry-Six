@@ -13,6 +13,8 @@ const ERROR_MESSAGES = {
   NETWORK: 'The storage service could not be reached. Check the network connection.',
   RATE_LIMIT: 'The storage service is limiting requests. Wait a moment and try again; signing in again is not required.',
   DUPLICATE_FILES: 'Same-name recording or event files could not be verified as identical and cannot be streamed safely.',
+  AMBIGUOUS_FOLDER: 'Multiple matching remote folders or recordings exist. Choose an unambiguous source.',
+  SOURCE_LIMIT: 'The footage source exceeds the bounded search. Choose its recording folder directly.',
   PERMISSION: 'Access was denied. Check folder access and local configuration permissions.',
   CONFIG_LOCKED: 'The rclone configuration is locked or cannot be edited by this app.',
   CONFIG_CONFLICT: 'The rclone configuration changed during sign-in. Please try again.',
@@ -125,7 +127,16 @@ class RcloneBrowser {
       }
       if (!Array.isArray(rows)) throw commandError('UNSUPPORTED');
       this.remoteTypes = new Map(rows.filter(row => row && typeof row.name === 'string' && /^[A-Za-z0-9_][A-Za-z0-9 _.-]{1,127}$/.test(row.name) && typeof row.type === 'string').map(row => [row.name, row.type]));
-      this.remotes = new Set(this.remoteTypes.keys()); this.folders.clear();
+      this.remotes = new Set(this.remoteTypes.keys());
+      const retained = new Set();
+      for (const source of [this.driveSource, this.loadedDriveSource]) {
+        let folder = source?.folder;
+        while (folder && !retained.has(folder)) {
+          retained.add(folder);
+          folder = this.folders.get(folder)?.parent;
+        }
+      }
+      for (const [ref, context] of this.folders) if (!retained.has(ref) || !this.remotes.has(context.remote)) this.folders.delete(ref);
       return [...this.remotes].sort();
     });
   }
@@ -157,7 +168,7 @@ class RcloneBrowser {
         const id = drive ? entry.ID.split('\t')[0] : null;
         result.folder = createHash('sha256').update(JSON.stringify([remote, folder, drive ? entry.ID : entry.Name])).digest('hex');
         if (drive) result.id = entry.ID.split('\t').at(-1);
-        this.folders.set(result.folder, { remote, parts: [...context.parts, entry.Name], id });
+        this.folders.set(result.folder, { remote, parts: [...context.parts, entry.Name], id, parent: folder });
       }
       return result;
     });
@@ -208,8 +219,116 @@ class RcloneBrowser {
       }
       const session = await streamTransport.start(this, remote, folder, [file]);
       this.driveStream = session;
+      this.driveSource = { path: session.files.keys().next().value, remote, folder };
       return { path: session.files.keys().next().value, size: file.size,
         source: { kind: 'rclone', remote, folder: this.folderContext(remote, folder).parts.join('/') } };
+    });
+  }
+  openDriveFootage(dataPath, routeFiles) {
+    return this.exclusive(async () => {
+      const source = [this.driveSource, this.loadedDriveSource].find(source => source?.path === dataPath);
+      if (!source || !this.remotes.has(source.remote)) throw commandError('INVALID_INPUT');
+      if (!Array.isArray(routeFiles) || !routeFiles.length || routeFiles.length > 10000) throw commandError('INVALID_INPUT');
+      const routes = [...new Set(routeFiles)].map(value => {
+        if (typeof value !== 'string' || value.length > 4096) throw commandError('INVALID_INPUT');
+        let parts;
+        try { parts = validatePath(value).split('/'); } catch { throw commandError('INVALID_INPUT'); }
+        if (parts.length > 16 || !CLIP.test(parts.at(-1))) throw commandError('INVALID_INPUT');
+        return { parts: parts.slice(0, -1), timestamp: parts.at(-1).slice(0, 19).toLowerCase() };
+      });
+      const timestamps = new Set(routes.map(route => route.timestamp));
+      const dates = new Set(routes.map(route => route.timestamp.slice(0, 10)));
+      const directories = [...new Set(routes.map(route => route.parts.join('/')))].map(value => value ? value.split('/') : []);
+      const cache = new Map();
+      const listing = async folder => {
+        if (!cache.has(folder)) {
+          // ponytail: bounded directory search; explicit folder selection handles larger archives.
+          if (cache.size >= 128) throw commandError('SOURCE_LIMIT');
+          cache.set(folder, await this.entries(source.remote, folder, true));
+        }
+        return cache.get(folder);
+      };
+      const child = async (folder, name) => {
+        const matches = (await listing(folder)).filter(row => row.isDirectory && row.name.toLowerCase() === name.toLowerCase());
+        if (matches.length > 1) throw commandError('AMBIGUOUS_FOLDER');
+        return matches[0]?.folder;
+      };
+      const roots = [];
+      let current = source.folder;
+      while (true) {
+        roots.push(current);
+        if (!current) break;
+        if (roots.length > 16) throw commandError('SOURCE_LIMIT');
+        current = this.folderContext(source.remote, current).parent ?? '';
+      }
+      const groups = [], names = new Map(), visited = new Set(), found = new Set();
+      for (const root of roots) {
+        const candidates = new Set();
+        candidates.add(root);
+        for (const parts of directories) {
+          let folder = root;
+          for (const part of parts) {
+            folder = await child(folder, part);
+            if (folder === undefined) break;
+          }
+          if (folder !== undefined) candidates.add(folder);
+        }
+        const tesla = await child(root, 'TeslaCam');
+        const layouts = new Set([root, ...(tesla === undefined ? [] : [tesla])]);
+        for (const layout of layouts) {
+          for (const category of ['RecentClips', 'SavedClips', 'SentryClips']) {
+            const folder = await child(layout, category);
+            if (folder !== undefined) candidates.add(folder);
+          }
+          candidates.add(layout);
+        }
+        for (const folder of [...candidates]) {
+          const rows = await listing(folder);
+          for (const row of rows) {
+            if (row.isDirectory && dates.has(row.name.slice(0, 10)) && /^\d{4}-\d{2}-\d{2}(?:_\d{2}-\d{2}-\d{2})?$/.test(row.name)) {
+              const same = rows.filter(other => other.isDirectory && other.name.toLowerCase() === row.name.toLowerCase());
+              if (same.length > 1) throw commandError('AMBIGUOUS_FOLDER');
+              candidates.add(row.folder);
+            }
+          }
+        }
+        for (const folder of candidates) {
+          if (visited.has(folder)) continue;
+          visited.add(folder);
+          const files = [];
+          for (const file of await listing(folder)) {
+            if (!file.playable || !timestamps.has(file.name.slice(0, 19).toLowerCase())) continue;
+            if (!safeName(file.name) || !Number.isSafeInteger(file.size) || file.size < 0) throw commandError('REMOTE_ERROR');
+            const previous = names.get(file.name.toLowerCase());
+            if (previous) {
+              if (!file.md5 || file.md5 !== previous.md5 || file.size !== previous.size) throw commandError('AMBIGUOUS_FOLDER');
+              continue;
+            }
+            names.set(file.name.toLowerCase(), file);
+            found.add(file.name.slice(0, 19).toLowerCase());
+            files.push(file);
+          }
+          if (files.length) groups.push({ folder, files });
+        }
+        if ([...timestamps].every(timestamp => found.has(timestamp))) break;
+      }
+      if (!groups.length) return null;
+      const sessions = [];
+      try {
+        for (const group of groups) sessions.push(await streamTransport.start(this, source.remote, group.folder, group.files));
+        const session = {
+          directory: sessions[0].directory, files: new Map(sessions.flatMap(item => [...item.files])), closed: false,
+          close() { if (this.closed) return; this.closed = true; for (const item of sessions) item.close(); }
+        };
+        this.stream?.close();
+        this.stream = session;
+        return {
+          directory: session.directory,
+          source: { kind: 'rclone', remote: source.remote, folder: this.folderContext(source.remote, source.folder).parts.join('/') },
+          files: [...session.files].map(([url, file]) => ({ name: file.name, path: url, size: file.size, isFile: true, isDirectory: false })),
+          fileCount: session.files.size
+        };
+      } catch (error) { for (const session of sessions) session.close(); throw error; }
     });
   }
   getDriveDataSource(value) {
@@ -268,6 +387,7 @@ function registerRcloneIpc({ ipcMain, app, getMainWindow, executable = 'rclone' 
   ipcMain.handle('rclone:list', invoke((remote, folder) => browser.list(remote, folder), true));
   ipcMain.handle('rclone:open', invoke((remote, folder) => browser.open(remote, folder), true));
   ipcMain.handle('rclone:openDriveData', invoke((remote, folder) => browser.openDriveData(remote, folder), true));
+  ipcMain.handle('rclone:openDriveFootage', invoke((dataPath, routeFiles) => browser.openDriveFootage(dataPath, routeFiles), true));
   ipcMain.handle('rclone:cancel', invoke(async (release = false) => {
     if (typeof release !== 'boolean') throw commandError('INVALID_INPUT');
     if (!config.active) {
@@ -277,7 +397,11 @@ function registerRcloneIpc({ ipcMain, app, getMainWindow, executable = 'rclone' 
   }));
   ipcMain.handle('rclone:status', invoke(() => config.status(), true));
   ipcMain.handle('rclone:check', invoke(remote => config.check(remote), true));
-  ipcMain.handle('rclone:configure', invoke(request => { browser.stream?.close(); browser.driveStream?.close(); return config.configure(request); }, true));
+  ipcMain.handle('rclone:configure', invoke(request => {
+    browser.stream?.close(); browser.driveStream?.close();
+    browser.driveSource = browser.loadedDriveSource = null;
+    return config.configure(request);
+  }, true));
   ipcMain.handle('rclone:configContinue', invoke(request => config.continue(request)));
   ipcMain.handle('rclone:configCancel', invoke(() => config.cancel()));
   ipcMain.handle('rclone:chooseExecutable', invoke(async () => {
@@ -293,6 +417,7 @@ function registerRcloneIpc({ ipcMain, app, getMainWindow, executable = 'rclone' 
       await fs.promises.access(selected, process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK);
       browser.stream?.close();
       browser.driveStream?.close();
+      browser.driveSource = browser.loadedDriveSource = null;
       browser.executable = selected;
       const status = await config.status();
       if (!status.installed) throw commandError('NOT_INSTALLED');

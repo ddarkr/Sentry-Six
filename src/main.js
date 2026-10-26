@@ -2883,6 +2883,7 @@ ipcMain.handle('sentryUsb:loadAndGroup', async (_event, filePath) => {
       routeCount: result.routeCount,
       routesLen: result.routesLen,
     };
+    if (remote) rcloneBrowser.loadedDriveSource = rcloneBrowser.driveSource;
 
     return {
       success: true,

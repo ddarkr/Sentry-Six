@@ -6,306 +6,181 @@ import { unwrapRcloneResponse as unwrap, getRcloneErrorMessage } from './rcloneS
 export function isReadOnlyRclonePath(value) {
     return isRcloneStreamUrl(value) || isRcloneStreamUrl(`${value}/thumb.png`);
 }
-
 let openDriveDataPicker = null;
-export function openRcloneDriveDataBrowser() {
-    openDriveDataPicker?.();
-}
+export function openRcloneDriveDataBrowser() { openDriveDataPicker?.(); }
 
 export function initRcloneBrowser(onOpen) {
     const api = window.electronAPI;
     const button = document.getElementById('rcloneOpenButton');
-    if (!button || !api?.rcloneRemotes || button.dataset.initialized) return;
-    button.dataset.initialized = 'true';
-    button.hidden = false;
-    const make = (tag, className, id) => {
-        const element = document.createElement(tag);
-        if (className) element.className = className;
-        if (id) element.id = id;
-        return element;
+    const panel = document.getElementById('rcloneTreePanel');
+    if (!button || !panel || !api?.rcloneRemotes || button.dataset.initialized) return;
+    button.dataset.initialized = 'true'; button.hidden = false;
+    button.setAttribute('aria-controls', panel.id);
+    const make = (tag, className = '', id = '') => {
+        const el = document.createElement(tag); el.className = className;
+        if (id) el.id = id;
+        return el;
     };
-    const icon = kind => {
-        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-        svg.setAttribute('viewBox', '0 0 24 24');
-        svg.setAttribute('aria-hidden', 'true');
-        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        path.setAttribute('d', kind === 'folder' ? 'M3 7h7l2 2h9v11H3V7Zm0 0V4h7l2 3' : 'M6 3h8l4 4v14H6V3Zm8 0v5h4');
-        svg.append(path);
-        return svg;
-    };
-    const dialog = make('dialog', 'rclone-dialog', 'rcloneDialog');
-    dialog.setAttribute('aria-labelledby', 'rcloneTitle');
-    dialog.setAttribute('aria-describedby', 'rcloneDescription');
-    const header = make('div', 'modal-header');
-    const title = make('h2', '', 'rcloneTitle');
-    const headerClose = make('button', 'icon-btn', 'rcloneHeaderClose');
-    headerClose.textContent = '×';
-    header.append(title, headerClose);
-    const body = make('div', 'modal-body rclone-body');
-    const help = make('p', 'rclone-description', 'rcloneDescription');
-    const storage = make('div', 'rclone-storage');
-    const label = make('label'); label.setAttribute('for', 'rcloneRemote');
-    const select = make('select', '', 'rcloneRemote');
-    const refresh = make('button', 'btn btn-secondary', 'rcloneRefresh');
-    const manage = make('button', 'btn btn-secondary', 'rcloneManage');
-    storage.append(label, select, refresh, manage);
-    const navigation = make('div', 'rclone-navigation');
-    const up = make('button', 'btn btn-secondary', 'rcloneUp');
-    const location = make('p', 'rclone-location', 'rcloneLocation');
-    navigation.append(up, location);
+    const header = make('div', 'rclone-tree-header');
+    const title = make('strong', '', 'rcloneTitle');
+    const refresh = make('button', 'btn btn-secondary btn-small', 'rcloneRefresh');
+    const manage = make('button', 'btn btn-secondary btn-small', 'rcloneManage');
+    const close = make('button', 'btn btn-secondary btn-small', 'rcloneClose');
+    header.append(title, refresh, manage, close);
     const status = make('p', 'rclone-status', 'rcloneStatus');
     status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
-    const authAction = make('button', 'btn btn-primary btn-small rclone-auth-action', 'rcloneAuthAction');
-    authAction.hidden = true;
-    const details = make('details', 'rclone-error-details', 'rcloneErrorDetails'); details.hidden = true;
-    const summary = make('summary');
-    const errorText = make('p'); details.append(summary, errorText);
-    const list = make('div', 'rclone-list', 'rcloneList');
-    body.append(help, storage, navigation, status, authAction, details, list);
-    const footer = make('div', 'modal-footer rclone-footer');
-    const safety = make('p', 'rclone-safety');
-    const close = make('button', 'btn btn-secondary', 'rcloneClose');
-    const open = make('button', 'btn btn-primary', 'rcloneDownload');
-    footer.append(safety, close, open);
-    dialog.append(header, body, footer);
-    document.body.append(dialog);
-    dialog.addEventListener('keydown', event => event.stopPropagation());
-    dialog.addEventListener('mousedown', event => event.stopPropagation());
-    let navStack = [], busy = false, generation = 0, hasClips = false, opening = false;
-    let driveDataMode = false;
-    let statusKey = 'chooseFolder', statusParams = {}, lastErrorCode = null, returnFocus = button;
-    const currentFolder = () => navStack.length > 0 ? navStack[navStack.length - 1].folder : '';
-    function setStatus(key, state = '', params = {}) {
-        statusKey = key; statusParams = params; lastErrorCode = null;
-        status.textContent = t(`ui.rclone.${key}`, params);
-        status.dataset.state = state;
-    }
-    function localize() {
-        button.title = t('ui.rclone.entry'); button.setAttribute('aria-label', button.title);
-        title.textContent = t(`ui.rclone.${driveDataMode ? 'driveTitle' : 'title'}`);
-        help.textContent = t(`ui.rclone.${driveDataMode ? 'driveDescription' : 'description'}`);
-        label.textContent = t('ui.rclone.remoteLabel'); refresh.textContent = t('ui.rclone.refresh');
-        manage.textContent = t('ui.rclone.manageConnections') || 'Manage Connections';
-        up.textContent = t('ui.rclone.up'); open.textContent = t(`ui.rclone.${driveDataMode ? 'driveOpen' : 'open'}`);
-        close.textContent = t(`ui.rclone.${busy ? 'cancel' : 'close'}`);
-        headerClose.setAttribute('aria-label', t('ui.rclone.close'));
-        safety.textContent = t(`ui.rclone.${driveDataMode ? 'driveSafety' : 'safety'}`); summary.textContent = t('ui.rclone.errorDetails');
-        authAction.textContent = t('ui.rclone.reconnect') || 'Reconnect';
-        if (lastErrorCode === 'RATE_LIMIT') {
-            status.textContent = getRcloneErrorMessage({ code: 'RATE_LIMIT' });
-        } else if (statusKey) {
-            status.textContent = t(`ui.rclone.${statusKey}`, statusParams);
-        }
-        for (const row of list.querySelectorAll('[data-folder-name]')) row.setAttribute('aria-label', `${t('ui.rclone.folder')}: ${row.dataset.folderName}`);
-    }
+    const reconnect = make('button', 'btn btn-secondary btn-small', 'rcloneAuthAction'); reconnect.hidden = true;
+    const list = make('ul', 'rclone-tree', 'rcloneList');
+    panel.append(header, status, reconnect, list);
+    let generation = 0, busy = false, cancelling = false, integrating = false;
+    let roots = [], selected = null, error = null, statusKey = 'chooseFolder';
+    const labels = [];
+    function label(el, key) { labels.push([el, key]); el.textContent = t(`ui.rclone.${key}`); }
+    label(title, 'treeTitle'); label(refresh, 'refresh'); label(manage, 'manageConnections'); label(reconnect, 'reconnect');
     function controls() {
-        select.disabled = busy || !select.value; refresh.disabled = busy; manage.disabled = busy;
-        up.disabled = busy || navStack.length === 0; open.disabled = busy || !hasClips;
-        for (const item of list.querySelectorAll('button')) item.disabled = busy;
-        button.disabled = busy; close.disabled = headerClose.disabled = opening && !driveDataMode;
-        dialog.setAttribute('aria-busy', String(busy));
+        button.disabled = cancelling;
+        button.setAttribute('aria-expanded', String(!panel.hidden));
+        panel.setAttribute('aria-busy', String(busy));
+        refresh.disabled = manage.disabled = busy || cancelling;
+        close.disabled = integrating || cancelling;
         close.textContent = t(`ui.rclone.${busy ? 'cancel' : 'close'}`);
+        for (const el of list.querySelectorAll('button')) el.disabled = busy || cancelling;
     }
-    async function run(fn, message) {
-        if (busy) return;
-        const current = ++generation;
-        busy = true; details.hidden = true; details.open = false; authAction.hidden = true;
-        controls(); setStatus(message, 'loading');
-        try { await fn(() => current === generation && dialog.open); }
-        catch (error) {
-            if (current === generation && dialog.open) {
-                lastErrorCode = error?.code || null;
-                if (error?.code === 'RATE_LIMIT') {
-                    statusKey = null;
-                    status.textContent = getRcloneErrorMessage(error);
-                    status.dataset.state = 'error';
-                    details.hidden = true;
-                    authAction.hidden = true;
-                } else {
-                    setStatus('errorTitle', 'error');
-                    errorText.textContent = getRcloneErrorMessage(error);
-                    details.hidden = !errorText.textContent;
-
-                    if (error?.code === 'AUTH_REQUIRED') {
-                        authAction.hidden = false;
-                    }
-                }
-            }
-        } finally {
-            if (current === generation) { busy = false; controls(); }
-        }
+    function showStatus(key, failure = null) {
+        statusKey = key; error = failure;
+        status.textContent = failure ? getRcloneErrorMessage(failure) : t(`ui.rclone.${key}`);
+        status.dataset.state = failure ? 'error' : busy ? 'loading' : '';
+        reconnect.hidden = failure?.code !== 'AUTH_REQUIRED';
     }
-    async function browse(active) {
-        hasClips = false; list.replaceChildren();
-        const pathNames = navStack.map(s => s.name).join('/');
-        location.textContent = navStack.length ? `${select.value}:/${pathNames}` : `${select.value}:/`;
-        location.title = location.textContent;
-        const entries = await unwrap(api.rcloneList(select.value, currentFolder()));
-        if (!active()) return;
-        let count = 0;
-
-        const dirCounts = new Map();
-        for (const entry of entries) {
-            if (entry.isDirectory) {
-                dirCounts.set(entry.name, (dirCounts.get(entry.name) || 0) + 1);
+    async function run(work, key) {
+        if (busy || cancelling) return;
+        const token = ++generation;
+        const active = () => token === generation && !panel.hidden;
+        busy = true; showStatus(key); controls();
+        try { await work(active); }
+        catch (failure) { if (active()) showStatus('errorTitle', failure); }
+        finally {
+            if (token === generation) {
+                busy = false;
+                if (!error) status.dataset.state = '';
+                controls();
             }
         }
-
-        for (const entry of entries) {
-            if (!entry.isDirectory && !(driveDataMode ? entry.name.toLowerCase() === 'drive-data.json' : entry.playable)) continue;
-            const row = make(entry.isDirectory ? 'button' : 'div', 'rclone-row');
-            if (entry.isDirectory) {
-                const isDuplicate = (dirCounts.get(entry.name) || 0) > 1;
-                const idSuffix = isDuplicate && entry.id ? (entry.id.length > 6 ? entry.id.slice(-6) : entry.id) : '';
-                const displayName = idSuffix ? `${entry.name} (${idSuffix})` : entry.name;
-
-                const name = make('span', 'rclone-row-name');
-                name.textContent = displayName;
-                row.title = displayName;
-                row.append(icon('folder'), name);
-
-                row.dataset.folderName = displayName;
-                row.setAttribute('aria-label', `${t('ui.rclone.folder')}: ${displayName}`);
-
-                const targetFolder = entry.folder;
-                row.onclick = () => {
-                    if (busy) return;
-                    navStack.push({ folder: targetFolder, name: entry.name });
-                    run(browse, 'readingFolder');
-                };
-            } else {
-                count++;
-                const name = make('span', 'rclone-row-name');
-                name.textContent = entry.name;
-                row.title = entry.name;
-                row.append(icon('file'), name);
-                const size = make('span', 'rclone-row-size');
-                size.textContent = `${(entry.size / 1024 ** 2).toFixed(1)} MiB`;
-                row.append(size);
-            }
-            list.append(row);
-        }
-        hasClips = count > 0;
-        setStatus(hasClips ? (driveDataMode ? 'driveReady' : 'ready') : driveDataMode ? 'driveChooseFolder' : list.children.length ? 'chooseFolder' : 'emptyFolder', hasClips ? 'ready' : '', { count });
     }
-    async function load(active) {
-        hasClips = false; list.replaceChildren(); select.replaceChildren(); location.textContent = '';
-        const remotes = await unwrap(api.rcloneRemotes());
-        if (!active()) return;
-        for (const remote of remotes) { const option = make('option'); option.value = option.textContent = remote; select.append(option); }
-        navStack.length = 0;
-        if (!remotes.length) { setStatus('noRemotes'); return; }
-        await browse(active);
-    }
-    function onReturnFromSettings(targetRemote) {
-        returnFocus = button;
-        dialog.showModal();
-        run(async active => {
-            navStack.length = 0;
-            hasClips = false; list.replaceChildren(); select.replaceChildren(); location.textContent = '';
-            const remotes = await unwrap(api.rcloneRemotes());
+    async function activate(node, filename, driveData = false) {
+        selected = node;
+        return run(async active => {
+            const result = await unwrap(driveData ? api.rcloneOpenDriveData(node.remote, node.folder) : api.rcloneOpen(node.remote, node.folder));
             if (!active()) return;
-            for (const remote of remotes) { const option = make('option'); option.value = option.textContent = remote; select.append(option); }
-            if (targetRemote && remotes.includes(targetRemote)) {
-                select.value = targetRemote;
-            }
-            if (!remotes.length) { setStatus('noRemotes'); return; }
-            await browse(active);
-        }, 'findingRemotes');
-    }
-    function openSettings(isReconnect = false) {
-        if (opening) return;
-        const preservedRemote = select.value;
-        dialog.close();
-        openSettingsModal('storage', preservedRemote, {
-            reconnect: isReconnect,
-            onReturn: (newRemote) => {
-                const finalRemote = newRemote || preservedRemote;
-                onReturnFromSettings(finalRemote);
-            }
-        });
-    }
-    manage.onclick = () => openSettings(false);
-    authAction.onclick = () => openSettings(true);
-    function showPicker(mode = false) {
-        if (dialog.open || busy) return;
-        driveDataMode = mode;
-        localize();
-        returnFocus = document.activeElement || button;
-        navStack.length = 0;
-        dialog.showModal(); run(load, 'findingRemotes');
-    }
-    button.onclick = () => showPicker();
-    openDriveDataPicker = () => showPicker(true);
-    refresh.onclick = () => {
-        if (busy) return;
-        navStack.length = 0;
-        run(load, 'findingRemotes');
-    };
-    select.onchange = () => {
-        if (busy) return;
-        navStack.length = 0;
-        run(browse, 'readingFolder');
-    };
-    up.onclick = () => {
-        if (busy || navStack.length === 0) return;
-        navStack.pop();
-        run(browse, 'readingFolder');
-    };
-    open.onclick = () => {
-        if (!hasClips || opening) return;
-        run(async active => {
-            const requestGeneration = generation;
-            const result = await unwrap(driveDataMode ? api.rcloneOpenDriveData(select.value, currentFolder()) : api.rcloneOpen(select.value, currentFolder()));
-            if (!active()) return;
-            opening = true; controls(); setStatus(driveDataMode ? 'driveLoading' : 'preparing', 'loading');
+            integrating = !driveData; controls();
             try {
-                if (driveDataMode) {
+                if (driveData) {
                     const loaded = await window._loadSentryUsbData(result.path);
                     if (!active()) return;
                     if (!loaded?.success) throw new Error(loaded?.error || t('ui.rclone.driveLoadError'));
+                    document.getElementById('drivesTabBtn')?.click();
                 } else {
-                    await onOpen(result);
+                    await onOpen(filename ? { ...result, selectedFile: filename } : result);
                 }
-                if (active()) dialog.close();
-            } catch (error) {
-                if (active()) await (driveDataMode ? api.rcloneCancel?.() : api.rcloneCancel?.(true));
-                throw error;
-            } finally { if (requestGeneration === generation) { opening = false; controls(); } }
+                if (active()) showStatus(driveData ? 'driveReady' : 'chooseFolder');
+            } catch (failure) {
+                if (active()) await api.rcloneCancel?.(!driveData);
+                throw failure;
+            } finally { integrating = false; controls(); }
         }, 'openingStream');
-    };
-    async function cancel() {
-        if (!dialog.open || (opening && !driveDataMode)) return;
-        const cancelling = busy;
-        ++generation; opening = false; dialog.close(); controls();
-        try {
-            if (cancelling && api.rcloneCancel) await api.rcloneCancel();
-        } catch (_) {
-        } finally {
-            busy = false; controls(); returnFocus?.focus();
+    }
+    async function expand(node, active) {
+        selected = node;
+        if (node.loaded) {
+            node.expanded = !node.expanded;
+            node.children.hidden = !node.expanded;
+            node.toggle.setAttribute('aria-expanded', String(node.expanded));
+            showStatus('chooseFolder');
+            return;
+        }
+        const entries = await unwrap(api.rcloneList(node.remote, node.folder));
+        if (!active()) return;
+        const counts = new Map();
+        for (const entry of entries) if (entry.isDirectory) counts.set(entry.name, (counts.get(entry.name) || 0) + 1);
+        for (const entry of entries) {
+            if (entry.isDirectory) {
+                const suffix = counts.get(entry.name) > 1 && entry.id ? ` (${entry.id.slice(-6)})` : '';
+                addDirectory(node.children, { remote: node.remote, folder: entry.folder, name: entry.name + suffix });
+            } else if (entry.playable || entry.name.toLowerCase() === 'drive-data.json') {
+                const item = make('li'); const file = make('button', 'rclone-tree-file');
+                file.textContent = entry.name; file.title = entry.name;
+                file.onclick = () => activate(node, entry.name, entry.name.toLowerCase() === 'drive-data.json');
+                item.append(file); node.children.append(item);
+            }
+        }
+        if (entries.some(entry => !entry.isDirectory && entry.playable)) {
+            const play = make('button', 'rclone-tree-play'); label(play, 'playFolder');
+            play.onclick = () => activate(node); node.row.append(play);
+        }
+        node.loaded = node.expanded = true; node.children.hidden = false;
+        node.toggle.setAttribute('aria-expanded', 'true');
+        showStatus(node.children.children.length ? 'chooseFolder' : 'emptyFolder');
+    }
+    function addDirectory(parent, node) {
+        const item = make('li', 'rclone-tree-directory');
+        node.row = make('div', 'rclone-tree-row');
+        node.toggle = make('button', 'rclone-tree-toggle');
+        node.toggle.textContent = node.name; node.toggle.title = node.name;
+        node.toggle.setAttribute('aria-expanded', 'false');
+        node.children = make('ul'); node.children.hidden = true;
+        node.toggle.onclick = () => run(active => expand(node, active), 'readingFolder');
+        node.row.append(node.toggle); item.append(node.row, node.children); parent.append(item);
+        return node;
+    }
+    async function load(active, targetRemote) {
+        const remotes = await unwrap(api.rcloneRemotes());
+        if (!active()) return;
+        list.replaceChildren(); roots = []; labels.splice(4);
+        selected = null;
+        for (const remote of remotes) roots.push(addDirectory(list, { remote, folder: '', name: remote }));
+        showStatus(remotes.length ? 'chooseFolder' : 'noRemotes');
+        const target = roots.find(root => root.remote === targetRemote);
+        if (target) await expand(target, active);
+    }
+    function show(targetRemote, reload = false) {
+        if (cancelling || busy) return;
+        panel.hidden = false; controls();
+        if (!roots.length || reload) run(active => load(active, targetRemote), 'findingRemotes');
+        else if (targetRemote) {
+            const node = roots.find(root => root.remote === targetRemote);
+            if (node && !node.expanded) run(active => expand(node, active), 'readingFolder');
         }
     }
-    close.onclick = headerClose.onclick = cancel;
-    dialog.addEventListener('cancel', event => { event.preventDefault(); cancel(); });
-    dialog.addEventListener('close', () => { returnFocus?.focus(); });
-
-    registerRcloneBrowserOpener((remoteName, mode = false) => {
-        if (dialog.open || busy) return;
-        driveDataMode = mode; localize();
-        returnFocus = button;
-        navStack.length = 0;
-        dialog.showModal();
-        run(async active => {
-            hasClips = false; list.replaceChildren(); select.replaceChildren(); location.textContent = '';
-            const remotes = await unwrap(api.rcloneRemotes());
-            if (!active()) return;
-            for (const remote of remotes) { const option = make('option'); option.value = option.textContent = remote; select.append(option); }
-            if (remoteName && remotes.includes(remoteName)) select.value = remoteName;
-            if (!remotes.length) { setStatus('noRemotes'); return; }
-            await browse(active);
-        }, 'findingRemotes');
+    async function cancel() {
+        if (panel.hidden || cancelling || integrating) return;
+        const pending = busy;
+        ++generation; panel.hidden = true; busy = false; cancelling = pending; controls();
+        try { if (pending) await api.rcloneCancel?.(); }
+        catch (_) { /* Closing must remain possible when cancellation fails. */ }
+        finally { cancelling = false; controls(); button.focus(); }
+    }
+    function settings(reconnectAccount) {
+        if (busy || cancelling) return;
+        const remote = selected?.remote || roots[0]?.remote;
+        panel.hidden = true; controls();
+        openSettingsModal('storage', remote, { reconnect: reconnectAccount, onReturn: next => show(next || remote, true) });
+    }
+    button.onclick = () => panel.hidden ? show() : cancel();
+    close.onclick = cancel;
+    refresh.onclick = () => run(active => load(active), 'findingRemotes');
+    manage.onclick = () => settings(false); reconnect.onclick = () => settings(true);
+    panel.addEventListener('keydown', event => {
+        event.stopPropagation();
+        if (event.key === 'Escape') { event.preventDefault(); cancel(); }
     });
-
-    onLanguageChange(localize);
-    localize(); controls();
+    panel.addEventListener('mousedown', event => event.stopPropagation());
+    openDriveDataPicker = () => show();
+    registerRcloneBrowserOpener(remote => show(remote));
+    onLanguageChange(() => {
+        for (const [el, key] of labels) el.textContent = t(`ui.rclone.${key}`);
+        button.title = t('ui.rclone.entry'); button.setAttribute('aria-label', button.title);
+        showStatus(statusKey, error); controls();
+    });
+    button.title = t('ui.rclone.entry'); button.setAttribute('aria-label', button.title);
+    showStatus(statusKey); controls();
 }

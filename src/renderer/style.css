@@ -7954,152 +7954,51 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 }
 
-/* Remote folder browser: native modal positioning and app glass controls. */
-#rcloneOpenButton[hidden] { display: none; }
-.rclone-dialog {
-    position: fixed;
-    inset: 0;
-    margin: auto;
-    padding: 0;
-    width: min(640px, calc(100vw - 32px));
-    max-width: none;
-    max-height: min(620px, calc(100dvh - 40px));
-    box-sizing: border-box;
-    flex-direction: column;
-    overflow: hidden;
-    border: 1px solid var(--border-strong);
-    border-radius: 16px;
-    background: var(--modal-bg);
-    backdrop-filter: blur(24px) saturate(var(--glass-saturate));
-    color: var(--text-color);
-    font: inherit;
-    box-shadow: 0 24px 80px var(--shadow-strong);
-    color-scheme: dark;
-}
-.rclone-dialog:not([open]) { display: none; }
-.rclone-dialog[open] { display: flex; }
-.rclone-dialog::backdrop {
-    background: var(--overlay-bg);
-    backdrop-filter: blur(5px);
-}
-.rclone-dialog .modal-header { flex: 0 0 auto; gap: 12px; }
-.rclone-dialog .modal-header h2 { margin: 0; font-size: 16px; }
-.rclone-dialog .rclone-body {
-    padding: 18px 20px;
+/* Remote roots stay above the clip/drive lists without consuming the sidebar. */
+#rcloneOpenButton[hidden], .rclone-tree-panel[hidden],
+.rclone-tree-panel [hidden] { display: none; }
+.rclone-tree-panel {
+    flex: 0 1 auto;
     min-height: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-}
-.rclone-description, .rclone-safety {
-    margin: 0;
-    color: var(--text-secondary);
-    font-size: 12px;
-    line-height: 1.5;
-}
-.rclone-storage {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 7px 8px;
-    align-items: center;
-}
-.rclone-storage label {
-    width: 100%;
-    color: var(--text-secondary);
-    font-size: 11px;
-    font-weight: 600;
-}
-.rclone-storage select {
-    flex: 1;
-    min-width: 140px;
-    height: 36px;
-    padding: 0 10px;
-    border: 1px solid var(--input-border);
-    border-radius: 8px;
-    background: var(--input-bg);
+    max-height: min(38vh, 320px);
+    overflow: auto;
+    padding: 8px;
+    border-bottom: 1px solid var(--border-subtle);
     color: var(--text-color);
-    font: inherit;
-    font-size: 12px;
-    text-overflow: ellipsis;
+    scrollbar-width: thin;
 }
-.rclone-dialog .btn { min-height: 36px; font-size: 12px; white-space: nowrap; }
-.rclone-navigation { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.rclone-location {
-    margin: 0;
-    min-width: 0;
-    color: var(--text-secondary);
-    font-size: 12px;
+.rclone-tree-header { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.rclone-tree-header strong { flex: 1; font-size: 12px; }
+.rclone-tree-panel .btn { padding: 4px 6px; min-height: 26px; font-size: 11px; }
+.rclone-status { margin: 6px 0; font-size: 11px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.rclone-status[data-state="error"] { color: var(--error-color); }
+.rclone-status[data-state="loading"] { color: var(--accent-color); }
+.rclone-tree, .rclone-tree ul { list-style: none; margin: 0; padding: 0; }
+.rclone-tree ul { padding-left: 12px; border-left: 1px solid var(--border-subtle); margin-left: 5px; }
+.rclone-tree-row { display: flex; align-items: center; min-width: 0; }
+.rclone-tree button {
+    background: transparent;
+    color: var(--text-color);
+    border: 0;
+    border-radius: 4px;
+    font: inherit;
+    font-size: 11px;
+    text-align: left;
+    padding: 6px 4px;
+    cursor: pointer;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-.rclone-status { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-secondary); overflow-wrap: anywhere; }
-.rclone-status[data-state="ready"] { color: var(--accent-color); }
-.rclone-status[data-state="error"] { color: var(--error-color); }
-.rclone-status[data-state="loading"] { display: flex; align-items: center; gap: 8px; }
-.rclone-status[data-state="loading"]::before {
-    content: "";
-    width: 11px;
-    height: 11px;
-    flex: 0 0 auto;
-    border: 2px solid var(--border-strong);
-    border-top-color: var(--accent-color);
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-}
-.rclone-list {
-    overflow-y: auto;
-    min-height: 100px;
-    max-height: 260px;
-    border: 1px solid var(--border-subtle);
-    border-radius: 10px;
-    background: var(--input-bg);
-    scrollbar-width: thin;
-}
-.rclone-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    box-sizing: border-box;
-    width: 100%;
-    min-height: 42px;
-    padding: 10px 12px;
-    border: 0;
-    border-bottom: 1px solid var(--border-subtle);
-    background: transparent;
-    color: var(--text-color);
-    text-align: left;
-    font: inherit;
-    font-size: 12px;
-}
-.rclone-row:last-child { border-bottom: 0; }
-button.rclone-row { cursor: pointer; }
-button.rclone-row:hover { background: var(--surface-hover); }
-button.rclone-row:active, .rclone-dialog .btn:active { background: var(--surface-active); }
-.rclone-row svg { width: 18px; height: 18px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.5; color: var(--text-secondary); }
-.rclone-row-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rclone-row-size { color: var(--text-secondary); font-size: 11px; white-space: nowrap; }
-.rclone-dialog .rclone-footer { display: flex; align-items: center; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--border-subtle); flex: 0 0 auto; }
-.rclone-safety { margin-right: auto; font-size: 11px; }
-.rclone-dialog :is(button, select):focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2px; }
-.rclone-dialog :is(button, select):disabled { opacity: 0.4; cursor: not-allowed; }
-.rclone-error-details { font-size: 11px; color: var(--text-secondary); }
-.rclone-error-details[hidden] { display: none; }
-.rclone-error-details summary { cursor: pointer; }
-.rclone-error-details p { max-height: 70px; overflow: auto; overflow-wrap: anywhere; margin: 8px 0 0; }
-@media (max-width: 480px) {
-    .rclone-dialog { width: calc(100vw - 24px); max-height: calc(100dvh - 24px); border-radius: 12px; }
-    .rclone-dialog .modal-header { padding: 14px; }
-    .rclone-dialog .rclone-body { padding: 14px; gap: 12px; }
-    .rclone-dialog .rclone-footer { padding: 12px 14px; flex-wrap: wrap; }
-    .rclone-safety { flex-basis: 100%; }
-    .rclone-dialog .rclone-footer .btn { flex: 1; }
-    .rclone-navigation { gap: 8px; }
-}
-@media (prefers-reduced-motion: reduce) {
-    .rclone-status[data-state="loading"]::before,
-    .rclone-spinner { animation: none !important; }
-}
+.rclone-tree-toggle { flex: 1; min-width: 0; }
+.rclone-tree-toggle::before { content: '▸'; display: inline-block; width: 12px; color: var(--text-secondary); }
+.rclone-tree-toggle[aria-expanded="true"]::before { content: '▾'; }
+.rclone-tree-file { width: 100%; color: var(--text-secondary) !important; }
+.rclone-tree-play { flex: 0 0 auto; color: var(--accent-color) !important; }
+.rclone-tree button:hover { background: var(--surface-hover); }
+.rclone-tree-panel button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: -2px; }
+.rclone-tree-panel button:disabled { opacity: 0.4; cursor: not-allowed; }
+.clips-mode-hidden .rclone-tree-panel { display: none; }
 
 /* Rclone Connection Management & Settings */
 .rclone-auth-action {

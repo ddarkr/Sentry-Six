@@ -16,6 +16,7 @@ export const translations = {
                 cameras: "Cameras: {cameras}"
             },
             rclone: {
+                treeTitle: "Remote folders", playFolder: "Play",
                 driveEntry: "Open remote drive-data.json", driveTitle: "Remote drive data",
                 driveDescription: "Choose a folder containing drive-data.json to stream your driving history.",
                 driveOpen: "Load drive data", driveReady: "drive-data.json is ready to load.",
@@ -476,6 +477,7 @@ export const translations = {
                 cameras: "카메라: {cameras}"
             },
             rclone: {
+                treeTitle: "원격 폴더", playFolder: "재생",
                 driveEntry: "원격 drive-data.json 열기", driveTitle: "원격 주행 데이터",
                 driveDescription: "drive-data.json이 있는 폴더를 선택해 주행 기록을 스트리밍합니다.",
                 driveOpen: "주행 데이터 불러오기", driveReady: "drive-data.json을 불러올 수 있습니다.",
