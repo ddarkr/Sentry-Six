@@ -125,7 +125,7 @@ Have questions, feedback, or want to connect with other users?
 Join our [Discord Server](https://discord.com/invite/9QZEzVwdnt)!
 
 ## Requirements
-- Windows / MacOS 10.12+ / Linux
+- Windows 10+ (x64) / macOS 13+ (Intel or Apple Silicon) / Linux (x64 or arm64)
 
 ## Automatic Installation for Windows & MacOS (Recommended, easiest)
 1. Go to the Sentry Studio [Releases](https://github.com/ChadR23/Sentry-Six/releases/) page
@@ -138,15 +138,15 @@ Join our [Discord Server](https://discord.com/invite/9QZEzVwdnt)!
 
 ## Manual Installation
 
-1. Install [node.js](https://nodejs.org/en/download)
+1. Install [Node.js](https://nodejs.org/en/download) 22.12.0 or later.
 2. Extract Sentry Studio to your desired location.
 3. Open a new Terminal (Command Prompt or Power Shell) and head to the Sentry Studio folder `cd C:\users\yourname\downloads\Sentry-Studio`
 4. In your Sentry Studio folder, use the following command: `npm install`
 6. To run Sentry Studio, use `npm start`
 
-Alternatively, with pnpm 11, run `pnpm install` and `pnpm dev`. The repository's `pnpm-workspace.yaml` explicitly approves the five dependency installation scripts; other dependencies are not automatically approved. Use one package manager per checkout to avoid moving packages between installation layouts.
+Alternatively, with pnpm 11, run `pnpm install` and `pnpm dev`. The repository's `pnpm-workspace.yaml` limits build-script approval to five reviewed dependencies; Electron 45 and protobufjs 8 no longer use postinstall scripts. Use one package manager per checkout to avoid moving packages between installation layouts.
 
-Node.js 24.16.0 has a [known Electron archive-extraction regression](https://github.com/electron/electron/issues/51619): installation can finish without creating the Electron executable. If affected, use Node.js 24.15.0 (`nvm use 24.15.0`) and run `pnpm rebuild electron` before `pnpm dev`.
+Electron 45 downloads its executable on first use rather than during package installation. To download it before starting the app, run `pnpm exec install-electron` (or `npm exec -- install-electron`). The renderer's vendored protobuf browser bundle matches the installed protobufjs 8 runtime.
 
 ### Development checks
 

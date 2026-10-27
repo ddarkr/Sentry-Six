@@ -24,15 +24,15 @@
   "license": "MIT",
   "type": "commonjs",
   "devDependencies": {
-    "electron": "^39.2.7",
-    "electron-builder": "^26.6.0",
-    "jest": "^30.4.2"
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0",
+    "jest": "^30.5.2"
   },
   "dependencies": {
-    "electron-updater": "^6.1.7",
+    "electron-updater": "^6.8.11",
     "pngjs": "^7.0.0",
-    "protobufjs": "^7.5.4",
-    "stream-json": "^3.1.0"
+    "protobufjs": "^8.8.1",
+    "stream-json": "^3.7.0"
   },
   "build": {
     "appId": "com.sentry-six.revamped",
